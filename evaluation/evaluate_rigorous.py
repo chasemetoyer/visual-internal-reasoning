@@ -168,18 +168,18 @@ def evaluate():
     print("\nVERDICT:")
     # 1. Did it learn to read images?
     if acc_teach > acc_blind + 10:
-        print("✅ PASS: Model relies on visual data (Teacher >> Blindfold).")
+        print(" PASS: Model relies on visual data (Teacher >> Blindfold).")
     else:
-        print("❌ FAIL: Model ignores images.")
+        print(" FAIL: Model ignores images.")
 
     # 2. Does imagination work?
     best_imagination = max(acc_greedy, acc_sampled)
     if best_imagination > acc_blind + 5:
-        print(f"✅ PASS: Internal imagination works ({best_imagination:.1f}% vs {acc_blind:.1f}%).")
+        print(f" PASS: Internal imagination works ({best_imagination:.1f}% vs {acc_blind:.1f}%).")
     elif best_imagination > majority_baseline:
-        print("⚠️ WEAK PASS: Better than guessing, but not much better than noise.")
+        print(" WEAK PASS: Better than guessing, but not much better than noise.")
     else:
-        print("❌ FAIL: Imagination is useless.")
+        print(" FAIL: Imagination is useless.")
 
 if __name__ == "__main__":
     evaluate()
