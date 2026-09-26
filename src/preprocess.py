@@ -114,9 +114,9 @@ def main():
                 assert len(img_block) == 256, f"Expected 256 image tokens, got {len(img_block)}"
                 assert img_min >= VOCAB_OFFSET, f"Image token {img_min} is below offset {VOCAB_OFFSET}"
                 assert img_max < VOCAB_OFFSET + 16384, f"Image token {img_max} is out of range"
-                print("✅ All checks passed for first sample!\n")
+                print("All checks passed for first sample!\n")
             except Exception as e:
-                print(f"❌ Sanity check failed: {e}")
+                print(f"Sanity check failed: {e}")
                 import sys; sys.exit(1)
 
     # 3. Save with METADATA
