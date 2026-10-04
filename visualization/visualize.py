@@ -2,6 +2,12 @@ import torch
 import yaml
 import numpy as np
 from PIL import Image
+# taming-transformers imports pytorch_lightning.utilities.distributed, which was
+# removed in newer Lightning versions; alias it to the current location.
+import sys
+import pytorch_lightning.utilities.rank_zero as _pl_rank_zero
+sys.modules.setdefault("pytorch_lightning.utilities.distributed", _pl_rank_zero)
+
 from taming.models.vqgan import VQModel
 from transformers import GPT2TokenizerFast
 import sys

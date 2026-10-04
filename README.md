@@ -108,6 +108,17 @@ Collapse in performance confirms the answer $y_{answer}$ is downstream of the vi
 pip install -r requirements.txt
 ```
 
+### **VQGAN Weights**
+
+The pretrained VQGAN (ImageNet, f16, 16384 codes) from [Taming Transformers](https://github.com/CompVis/taming-transformers) is not included in this repo. Download the config and checkpoint (~1 GB) into the repository root:
+
+```bash
+curl -L -o vqgan_imagenet_f16_16384.yaml "https://heibox.uni-heidelberg.de/d/a7530b09fed84f80a887/files/?p=%2Fconfigs%2Fmodel.yaml&dl=1"
+curl -L -o vqgan_imagenet_f16_16384.ckpt "https://heibox.uni-heidelberg.de/d/a7530b09fed84f80a887/files/?p=%2Fckpts%2Flast.ckpt&dl=1"
+```
+
+If the `.ckpt` is only a few KB, the download failed; retry. Run all scripts from the repository root so these paths resolve.
+
 ### **1. Data Generation**
 
 Generate the synthetic spatial reasoning dataset (100k samples).
@@ -119,7 +130,7 @@ python src/datafactory.py --size 100000
 ### **2. Preprocessing**
 
 Tokenize text and encode images into discrete VQGAN indices.
-*Note: Requires `vqgan_imagenet_f16_16384.ckpt` in root.*
+*Note: Requires the VQGAN weights (see [VQGAN Weights](#vqgan-weights)).*
 
 ```bash
 python src/preprocess.py
