@@ -17,6 +17,7 @@ MAX_ITERS = 30000 # SCALED UP: 2.5k -> 30k (This is roughly 2.5 epochs)
 VAL_INTERVAL = 1000 # Validate every 1000 iterations
 SAVE_INTERVAL = 5000 # Save every 5000 iterations
 FORMATS = ("image", "text", "filler") # Built by preprocess.py; identical training for all three
+CKPT_VERSION = "v2" # In checkpoint names and contents. v2 = pre-LN residual fix; untagged checkpoints are invalid
 
 if torch.cuda.is_available(): DEVICE = 'cuda'
 elif torch.backends.mps.is_available(): DEVICE = 'mps'
@@ -128,12 +129,34 @@ class Block(nn.Module):
             nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
         )
     def forward(self, x):
-        return x + self.mlp(self.ln2(x + self.attn(self.ln1(x))))
+        # Standard pre-LN block: each sub-layer's output is added to the residual stream
+        x = x + self.attn(self.ln1(x))
+        x = x + self.mlp(self.ln2(x))
+        return x
 
 class GPTConfig:
     def __init__(self, vocab_size, block_size, n_layer=6, n_head=6, n_embd=384):
         self.vocab_size = vocab_size; self.block_size = block_size
         self.n_layer = n_layer; self.n_head = n_head; self.n_embd = n_embd
+
+# --- CHECKPOINTS ---
+def save_checkpoint(model, config, meta, fmt, path):
+    """Saves the weights with everything needed to rebuild and check them (see load_checkpoint)."""
+    torch.save({"version": CKPT_VERSION, "format": fmt, "config": vars(config), "meta": meta,
+                "state_dict": model.state_dict()}, path)
+
+def load_checkpoint(path, device, expected_format=None):
+    """Loads a checkpoint written by save_checkpoint and returns (model in eval mode, checkpoint).
+    Refuses anything else, including every checkpoint saved before the residual-stream fix."""
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    if not (isinstance(ckpt, dict) and ckpt.get("version") == CKPT_VERSION):
+        raise SystemExit(f"{path} is not a {CKPT_VERSION} checkpoint. Checkpoints saved before the "
+                         f"residual-stream fix are invalid; retrain with src/train_imaginer.py.")
+    if expected_format is not None and ckpt["format"] != expected_format:
+        raise SystemExit(f"{path} was trained on the '{ckpt['format']}' format, not '{expected_format}'.")
+    model = GPT(GPTConfig(**ckpt["config"]))
+    model.load_state_dict(ckpt["state_dict"])
+    return model.eval().to(device), ckpt
 
 # --- 3. TRAINING LOOP ---
 def check_loss_mask(dataset):
@@ -221,8 +244,8 @@ def main():
             
             # --- PROGRESS SAVING ---
             if iter_num > 0 and iter_num % SAVE_INTERVAL == 0:
-                checkpoint_name = os.path.join(args.out_dir, f"imaginer_{args.format}_ckpt_{iter_num}.pth")
-                torch.save(model.state_dict(), checkpoint_name)
+                checkpoint_name = os.path.join(args.out_dir, f"imaginer_{CKPT_VERSION}_{args.format}_ckpt_{iter_num}.pth")
+                save_checkpoint(model, config, dataset.meta, args.format, checkpoint_name)
                 print(f"--> Saved backup: {checkpoint_name}")
             
             if iter_num % 100 == 0:
@@ -237,8 +260,8 @@ def main():
     print(f"Done in {time.time()-start:.1f}s")
     val_loss, val_answer_loss = estimate_val_loss(model, val_loader)
     print(f"Final: Val loss {val_loss:.4f} | Val answer loss {val_answer_loss:.4f}")
-    final_name = os.path.join(args.out_dir, f"imaginer_{args.format}_final.pth")
-    torch.save(model.state_dict(), final_name)
+    final_name = os.path.join(args.out_dir, f"imaginer_{CKPT_VERSION}_{args.format}_final.pth")
+    save_checkpoint(model, config, dataset.meta, args.format, final_name)
     print(f"Saved {final_name}")
 
 if __name__ == "__main__":

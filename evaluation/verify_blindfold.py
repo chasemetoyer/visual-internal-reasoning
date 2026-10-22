@@ -3,12 +3,11 @@ import torch.nn.functional as F
 from transformers import GPT2TokenizerFast
 import sys
 import os
+import argparse
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.train_imaginer import GPT, GPTConfig 
+from src.train_imaginer import load_checkpoint
 
 # --- CONFIG ---
-MODEL_PATH = "imaginer_ckpt_15000.pth"
-DATA_PATH = "train_data_final.pt"
 IMG_TOKENS = 256
 ANSWER_TOKENS = 10
 IGNORE_VAL = -1e10
@@ -18,18 +17,17 @@ elif torch.backends.mps.is_available(): DEVICE = 'mps'
 else: DEVICE = 'cpu'
 
 def blindfold_test_strict():
-    # 1. Load Data & Model
-    data = torch.load(DATA_PATH, weights_only=False)
-    meta = data['meta']
+    parser = argparse.ArgumentParser(description="Answer one prompt after replacing the imagined picture with noise.")
+    parser.add_argument("--ckpt", required=True, help="image-format checkpoint from src/train_imaginer.py")
+    args = parser.parse_args()
+
+    # 1. Load Model (the vocabulary IDs are stored in the checkpoint)
+    model, ckpt = load_checkpoint(args.ckpt, DEVICE, expected_format="image")
+    meta = ckpt['meta']
     vocab_size = meta['vocab_size_total']
     img_start_id = meta['img_start_id']
     img_end_id = meta['img_end_id']
     vocab_offset = meta['vocab_offset']
-    
-    config = GPTConfig(vocab_size=vocab_size, block_size=512)
-    model = GPT(config)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False))
-    model.eval().to(DEVICE)
     
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
     

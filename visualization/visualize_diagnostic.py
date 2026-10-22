@@ -12,13 +12,12 @@ from taming.models.vqgan import VQModel
 from transformers import GPT2TokenizerFast
 import sys
 import os
+import argparse
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.train_imaginer import GPT, GPTConfig 
+from src.train_imaginer import load_checkpoint
 import torch.nn.functional as F
 
 # --- CONFIG ---
-MODEL_PATH = "imaginer_ckpt_20000.pth"
-DATA_PATH = "train_data_final.pt"
 VQGAN_CONFIG = "vqgan_imagenet_f16_16384.yaml"
 VQGAN_CKPT = "vqgan_imagenet_f16_16384.ckpt"
 
@@ -39,19 +38,17 @@ def load_vqgan():
     return model
 
 def generate():
-    # 1. Load Data
-    data = torch.load(DATA_PATH, weights_only=False)
-    meta = data['meta']
+    parser = argparse.ArgumentParser(description="Sample the model's imagined picture for one prompt (T=0.8) and decode it.")
+    parser.add_argument("--ckpt", required=True, help="image-format checkpoint from src/train_imaginer.py")
+    args = parser.parse_args()
+
+    # 1-2. Load Model and its Metadata (vocab IDs are stored in the checkpoint)
+    model, ckpt = load_checkpoint(args.ckpt, DEVICE, expected_format="image")
+    meta = ckpt['meta']
     vocab_size = meta['vocab_size_total']
     img_start_id = meta['img_start_id']
     vocab_offset = meta['vocab_offset']
-    
-    # 2. Load Model
-    print(f"Loading Model (Vocab: {vocab_size})...")
-    config = GPTConfig(vocab_size=vocab_size, block_size=512)
-    model = GPT(config)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False))
-    model.eval().to(DEVICE)
+    print(f"Loaded Model from {args.ckpt} (Vocab: {vocab_size})")
     
     # 3. Prompt
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")

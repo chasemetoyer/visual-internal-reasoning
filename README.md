@@ -18,11 +18,13 @@ Our results demonstrate that models trained with forced internal visual intermed
 > - It was measured on training questions: the evaluation sampled its items from `train_data_final.pt`, the same file the model was trained on.
 > - The "Text-Only" row was not a text-only baseline: it fed the image model `[prompt][IMG_START][IMG_END]`, an input it never saw in training.
 > - The old generator's labels and pictures disagreed. `src/audit_datafactory.py` over all 100k old samples found that:
->   - 2.9% of labels contradict the shapes as drawn, mostly "No" pairs drawn overlapping.
+>   - 2.9% of labels contradict the shapes as drawn (2,699 of the 93,366 images where both shapes are visible), mostly "No" pairs drawn overlapping.
 >   - 20.4% of images have a shape partly or wholly outside the frame.
->   - 7.4% of samples share their exact prompt with a sample of the opposite label.
->   - In 56% of images the square hides part of the circle.
->   - The drawn square never sits where its prompt puts it (within 1 px).
+>   - 6.6% of images show only one shape: in 6,145 the square is entirely outside the frame, and in 489 the circle is completely hidden.
+>   - 7.4% of samples share their exact prompt with a sample of the opposite label, and 2.3% of labels differ from the answer their prompt implies.
+>   - In 52% of all images (52,422 of 100,000) the square hides part of the circle.
+>   - The prompts truncate positions to 25 px cells. The drawn square is on average 10.3 px (at most 24.7 px) from where its prompt puts it, and no sample has both shapes within 1 px of their prompt positions.
+> - The model had a residual-stream bug: `Block.forward` returned `x + mlp(ln2(x + attn(ln1(x))))`, so the attention output never entered the residual stream directly. Every checkpoint trained with it (all untagged `imaginer_*.pth` files) is invalid.
 >
 > Re-run the pipeline in [Getting Started](#getting-started) for valid numbers.
 
@@ -56,7 +58,7 @@ This research investigates three core claims regarding multimodal reasoning in t
 .
 ├── dataset_imagination_v2/       # Synthetic data: images + train/val/test.jsonl
 ├── processed_v2/                 # Preprocessed splits: train.pt, val.pt, test.pt (tokens + VQ indices + metadata)
-├── checkpoints/                  # Trained model weights
+├── checkpoints/                  # Trained weights: imaginer_v2_<format>_*.pth
 ├── taming/                       # VQGAN dependencies (Taming Transformers)
 ├── vqgan_imagenet_f16_16384.* # VQGAN Checkpoint & Config
 │
@@ -75,6 +77,9 @@ This research investigates three core claims regarding multimodal reasoning in t
 │   ├── visualize.py              # Generate and decode internal "dreams"
 │   └── diagnostic_dream.png      # Sample output of internal state
 │
+├── tests/
+│   └── test_block.py             # Residual-stream regression test for the transformer block
+│
 └── requirements.txt              # Project dependencies
 ```
 
@@ -84,7 +89,7 @@ This research investigates three core claims regarding multimodal reasoning in t
 
 ### **1. Architecture**
 
-We utilize a standard GPT-2 style decoder-only transformer. The vocabulary is expanded to include discrete codebook indices from a VQGAN trained on ImageNet.
+We utilize a standard GPT-2 style decoder-only transformer with pre-LN blocks (`x = x + attn(ln1(x))`, then `x = x + mlp(ln2(x))`). The vocabulary is expanded to include discrete codebook indices from a VQGAN trained on ImageNet.
 
 
 <img width="396" height="41" alt="Screenshot 2025-12-29 at 3 08 50 AM" src="https://github.com/user-attachments/assets/bc6123dc-0cd8-436c-9b8a-110f14f5b116" />
@@ -197,25 +202,35 @@ python src/train_imaginer.py --format text   --data processed_v2 --out-dir check
 python src/train_imaginer.py --format filler --data processed_v2 --out-dir checkpoints
 ```
 
+Checkpoints are written as `checkpoints/imaginer_v2_<format>_ckpt_<iter>.pth` and `checkpoints/imaginer_v2_<format>_final.pth`. Each one stores its format and vocabulary alongside the weights. `v2` marks the residual-stream fix: every script refuses checkpoints without the tag, because those were trained with the bug.
+
 ### **4. Evaluation**
 
 Run the forced-choice evaluation on the held-out test split. It scores `--n` items with distinct configurations (default 1,000; repeated renders of one prompt are not independent) in the test split's class mix, runs every model on the same items, and reports each accuracy with a 95% Wilson confidence interval, plus the majority-class baseline. Any of the three checkpoints can be left out.
 
 ```bash
 python evaluation/evaluate_rigorous.py --data processed_v2 --n 1000 \
-    --image-ckpt checkpoints/imaginer_image_final.pth \
-    --text-ckpt checkpoints/imaginer_text_final.pth \
-    --filler-ckpt checkpoints/imaginer_filler_final.pth
+    --image-ckpt checkpoints/imaginer_v2_image_final.pth \
+    --text-ckpt checkpoints/imaginer_v2_text_final.pth \
+    --filler-ckpt checkpoints/imaginer_v2_filler_final.pth
+```
+
+### **5. Tests**
+
+Check that the transformer block adds the attention output to the residual stream (this test fails on the old wiring):
+
+```bash
+python tests/test_block.py
 ```
 
 ---
 
 ## **Visualizing Internal States**
 
-To inspect the "imagination" of the model, run the visualization script. This decodes the generated token sequence back into pixel space using the VQGAN decoder.
+To inspect the "imagination" of the model, run the visualization script on an image-format checkpoint. This decodes the generated token sequence back into pixel space using the VQGAN decoder. `visualization/visualize_diagnostic.py`, `evaluation/verify_logic.py` and `evaluation/verify_blindfold.py` take the same `--ckpt` flag.
 
 ```bash
-python visualization/visualize.py
+python visualization/visualize.py --ckpt checkpoints/imaginer_v2_image_final.pth
 ```
 
 **Sample Output:**

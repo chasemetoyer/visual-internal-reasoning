@@ -7,7 +7,7 @@ import math
 import argparse
 from collections import Counter, defaultdict
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.train_imaginer import GPT, GPTConfig 
+from src.train_imaginer import load_checkpoint
 import random
 from tqdm import tqdm
 
@@ -97,14 +97,12 @@ def evaluate():
     samples = data['samples']
     meta = data['meta']
     
-    # All formats share one vocabulary, so every model has the same shape
+    # Each checkpoint must be a v2 checkpoint of the format its flag names, built on this vocabulary
     models = {}
     for fmt, path in ckpts.items():
         print(f"Loading {fmt} model from {path}...")
-        config = GPTConfig(vocab_size=meta['vocab_size_total'], block_size=BLOCK_SIZE)
-        model = GPT(config)
-        model.load_state_dict(torch.load(path, map_location=DEVICE, weights_only=False))
-        models[fmt] = model.eval().to(DEVICE)
+        models[fmt], ckpt = load_checkpoint(path, DEVICE, expected_format=fmt)
+        assert ckpt['meta'] == meta, f"{path} was trained on a different vocabulary than {test_path}"
     
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
     yes_ids, no_ids = tokenizer.encode(" Yes"), tokenizer.encode(" No")
