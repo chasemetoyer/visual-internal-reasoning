@@ -10,3 +10,4 @@ omegaconf
 einops
 pytorch-lightning
 huggingface_hub
+requests
