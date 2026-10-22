@@ -204,6 +204,8 @@ python src/train_imaginer.py --format filler --data processed_v2 --out-dir check
 
 Checkpoints are written as `checkpoints/imaginer_v2_<format>_ckpt_<iter>.pth` and `checkpoints/imaginer_v2_<format>_final.pth`. Each one stores its format and vocabulary alongside the weights. `v2` marks the residual-stream fix: every script refuses checkpoints without the tag, because those were trained with the bug.
 
+Training runs on CUDA, Apple MPS or the CPU. Each batch is padded only to its longest sequence, and attention uses PyTorch's fused `scaled_dot_product_attention`. On NVIDIA GPUs with tensor cores (A100, H100, L4), matrix multiplies run in TF32, which is faster but rounds slightly differently from other devices. Train all three formats on the same type of GPU so the comparison is not affected by hardware.
+
 ### **4. Evaluation**
 
 Run the forced-choice evaluation on the held-out test split. It scores `--n` items with distinct configurations (default 1,000; repeated renders of one prompt are not independent) in the test split's class mix, runs every model on the same items, and reports each accuracy with a 95% Wilson confidence interval, plus the majority-class baseline. Any of the three checkpoints can be left out. Each checkpoint records the configurations it trained on, and the evaluation refuses one that trained on any configuration in this test split (for example, a model trained on data generated with a different `--seed`).

@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader
-import math
 import time
 import os
 import argparse
@@ -23,6 +23,9 @@ if torch.cuda.is_available(): DEVICE = 'cuda'
 elif torch.backends.mps.is_available(): DEVICE = 'mps'
 else: DEVICE = 'cpu'
 print(f"Using Device: {DEVICE}")
+# On NVIDIA GPUs with tensor cores (A100, H100, L4), run float32 matmuls as TF32: several times faster,
+# slightly less precise. No effect on MPS, the CPU, or GPUs without TF32 such as the T4.
+torch.backends.cuda.matmul.allow_tf32 = True
 
 # --- 1. DATASET WITH METADATA LOADING ---
 class ImaginationDataset(Dataset):
@@ -58,14 +61,15 @@ class ImaginationDataset(Dataset):
         # Answer-only targets: the one loss that is comparable across sequence formats
         a = y.clone()
         a[:answer_start - 1] = -100
-        
-        pad_len = BLOCK_SIZE - len(x)
-        if pad_len > 0:
-            x = torch.cat([x, torch.full((pad_len,), 0, dtype=torch.long)])
-            y = torch.cat([y, torch.full((pad_len,), -100, dtype=torch.long)])
-            a = torch.cat([a, torch.full((pad_len,), -100, dtype=torch.long)])
-            
         return x, y, a
+
+def pad_batch(batch):
+    """Pads a batch to its longest sequence instead of BLOCK_SIZE. Attention is causal, so padding never
+    affects a real position, and its targets are ignored: the loss is unchanged, the compute is not wasted."""
+    xs, ys, answers = zip(*batch)
+    return (pad_sequence(xs, batch_first=True, padding_value=0),
+            pad_sequence(ys, batch_first=True, padding_value=-100),
+            pad_sequence(answers, batch_first=True, padding_value=-100))
 
 # --- 2. MODEL (Standard) ---
 class GPT(nn.Module):
@@ -102,6 +106,8 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
+        # No longer used for masking (scaled_dot_product_attention applies the causal mask itself);
+        # kept so checkpoints saved before that change still load.
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                      .view(1, 1, config.block_size, config.block_size))
     def forward(self, x):
@@ -110,10 +116,9 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        att = att.masked_fill(self.bias[:,:,:T,:T].to(x.device) == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        # PyTorch's fused causal attention (FlashAttention on recent NVIDIA GPUs; also runs on MPS and CPU):
+        # softmax(q @ k^T / sqrt(head_size) with future positions masked) @ v
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         return self.c_proj(y)
 
@@ -215,9 +220,9 @@ def main():
     train_configs = sorted({config_id(s["config"]) for s in dataset.samples})
 
     torch.manual_seed(args.seed)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True,
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=pad_batch,
                             generator=torch.Generator().manual_seed(args.seed))
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=pad_batch)
     
     config = GPTConfig(vocab_size=dataset.vocab_size, block_size=BLOCK_SIZE)
     model = GPT(config).to(DEVICE)
