@@ -7,7 +7,7 @@ import math
 import argparse
 from collections import Counter, defaultdict
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.train_imaginer import load_checkpoint
+from src.train_imaginer import load_checkpoint, config_id
 import random
 from tqdm import tqdm
 
@@ -46,10 +46,6 @@ def wilson_ci(k, n, z=Z_95):
     half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
     return centre - half, centre + half
 
-def config_key(sample):
-    c = sample['config']
-    return (tuple(c['square_start']), tuple(c['circle']), tuple(c['move']))
-
 def stratum(sample):
     # Yes / near-miss No / far No, so the scored items keep the split's mix of hard negatives
     return (sample['label'], sample['near_miss'])
@@ -61,7 +57,7 @@ def select_items(samples, n, seed):
     random.Random(seed).shuffle(order)
     pools, seen = defaultdict(list), set()
     for i in order:
-        key = config_key(samples[i])
+        key = config_id(samples[i]['config'])
         if key not in seen:
             seen.add(key)
             pools[stratum(samples[i])].append(i)
@@ -98,11 +94,18 @@ def evaluate():
     meta = data['meta']
     
     # Each checkpoint must be a v2 checkpoint of the format its flag names, built on this vocabulary
+    test_configs = {config_id(s['config']) for s in samples}
     models = {}
     for fmt, path in ckpts.items():
         print(f"Loading {fmt} model from {path}...")
         models[fmt], ckpt = load_checkpoint(path, DEVICE, expected_format=fmt)
         assert ckpt['meta'] == meta, f"{path} was trained on a different vocabulary than {test_path}"
+        # HELD-OUT CHECK: meta is the same for every dataset, so compare the configurations themselves.
+        # A checkpoint trained on another split (e.g. data generated with a different --seed) would fail here.
+        seen = test_configs & set(ckpt['train_configs'])
+        if seen:
+            raise SystemExit(f"{path} trained on {len(seen)} of the {len(test_configs)} test configurations in "
+                             f"{test_path}; evaluate it on the test split of the dataset it was trained on.")
     
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
     yes_ids, no_ids = tokenizer.encode(" Yes"), tokenizer.encode(" No")

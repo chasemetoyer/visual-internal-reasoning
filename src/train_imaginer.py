@@ -140,10 +140,16 @@ class GPTConfig:
         self.n_layer = n_layer; self.n_head = n_head; self.n_embd = n_embd
 
 # --- CHECKPOINTS ---
-def save_checkpoint(model, config, meta, fmt, path):
-    """Saves the weights with everything needed to rebuild and check them (see load_checkpoint)."""
+def config_id(config):
+    """Hashable ID of a configuration (square start, circle, move): the unit the splits are made of."""
+    return (*config["square_start"], *config["circle"], *config["move"])
+
+def save_checkpoint(model, config, meta, fmt, train_configs, path):
+    """Saves the weights with everything needed to rebuild and check them (see load_checkpoint).
+    train_configs records which configurations the model trained on, so evaluation can verify that
+    its test items were held out: meta only describes the vocabulary and is the same for every dataset."""
     torch.save({"version": CKPT_VERSION, "format": fmt, "config": vars(config), "meta": meta,
-                "state_dict": model.state_dict()}, path)
+                "train_configs": train_configs, "state_dict": model.state_dict()}, path)
 
 def load_checkpoint(path, device, expected_format=None):
     """Loads a checkpoint written by save_checkpoint and returns (model in eval mode, checkpoint).
@@ -206,6 +212,7 @@ def main():
     val_dataset = ImaginationDataset(os.path.join(args.data, "val.pt"), args.format)
     assert val_dataset.meta == dataset.meta, "train.pt and val.pt were built with different vocabularies"
     check_loss_mask(dataset)
+    train_configs = sorted({config_id(s["config"]) for s in dataset.samples})
 
     torch.manual_seed(args.seed)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True,
@@ -245,7 +252,7 @@ def main():
             # --- PROGRESS SAVING ---
             if iter_num > 0 and iter_num % SAVE_INTERVAL == 0:
                 checkpoint_name = os.path.join(args.out_dir, f"imaginer_{CKPT_VERSION}_{args.format}_ckpt_{iter_num}.pth")
-                save_checkpoint(model, config, dataset.meta, args.format, checkpoint_name)
+                save_checkpoint(model, config, dataset.meta, args.format, train_configs, checkpoint_name)
                 print(f"--> Saved backup: {checkpoint_name}")
             
             if iter_num % 100 == 0:
@@ -261,7 +268,7 @@ def main():
     val_loss, val_answer_loss = estimate_val_loss(model, val_loader)
     print(f"Final: Val loss {val_loss:.4f} | Val answer loss {val_answer_loss:.4f}")
     final_name = os.path.join(args.out_dir, f"imaginer_{CKPT_VERSION}_{args.format}_final.pth")
-    save_checkpoint(model, config, dataset.meta, args.format, final_name)
+    save_checkpoint(model, config, dataset.meta, args.format, train_configs, final_name)
     print(f"Saved {final_name}")
 
 if __name__ == "__main__":

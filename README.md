@@ -206,7 +206,7 @@ Checkpoints are written as `checkpoints/imaginer_v2_<format>_ckpt_<iter>.pth` an
 
 ### **4. Evaluation**
 
-Run the forced-choice evaluation on the held-out test split. It scores `--n` items with distinct configurations (default 1,000; repeated renders of one prompt are not independent) in the test split's class mix, runs every model on the same items, and reports each accuracy with a 95% Wilson confidence interval, plus the majority-class baseline. Any of the three checkpoints can be left out.
+Run the forced-choice evaluation on the held-out test split. It scores `--n` items with distinct configurations (default 1,000; repeated renders of one prompt are not independent) in the test split's class mix, runs every model on the same items, and reports each accuracy with a 95% Wilson confidence interval, plus the majority-class baseline. Any of the three checkpoints can be left out. Each checkpoint records the configurations it trained on, and the evaluation refuses one that trained on any configuration in this test split (for example, a model trained on data generated with a different `--seed`).
 
 ```bash
 python evaluation/evaluate_rigorous.py --data processed_v2 --n 1000 \
