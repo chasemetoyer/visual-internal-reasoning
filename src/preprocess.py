@@ -1,5 +1,6 @@
 import os
 import json
+import argparse
 import torch
 import yaml
 import numpy as np  # The speed booster
@@ -16,8 +17,9 @@ sys.modules.setdefault("pytorch_lightning.utilities.distributed", _pl_rank_zero)
 from taming.models.vqgan import VQModel
 
 # --- CONFIG ---
-DATA_DIR = "dataset_imagination_balanced"
-OUTPUT_FILE = "train_data_final.pt"
+DATA_DIR = "dataset_imagination_v2"  # Default --data (written by datafactory.py)
+OUTPUT_DIR = "processed_v2"          # Default --out: gets train.pt, val.pt, test.pt
+SPLITS = ("train", "val", "test")
 VQGAN_CONFIG = "vqgan_imagenet_f16_16384.yaml"
 VQGAN_CKPT = "vqgan_imagenet_f16_16384.ckpt"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
@@ -63,82 +65,103 @@ def preprocess_image(img_path, model):
         return None # Handle bad images gracefully
 
 def main():
+    parser = argparse.ArgumentParser(description="Tokenize prompts and VQGAN-encode images, one .pt per split.")
+    parser.add_argument("--data", default=DATA_DIR, help="dataset directory written by datafactory.py")
+    parser.add_argument("--out", default=OUTPUT_DIR, help="output directory for train.pt / val.pt / test.pt")
+    args = parser.parse_args()
+
     # 1. Setup Tokenizer
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
     tokenizer.add_special_tokens({'additional_special_tokens': ['<IMG_START>', '<IMG_END>']})
-    
+
     IMG_START_ID = tokenizer.convert_tokens_to_ids('<IMG_START>')
     IMG_END_ID = tokenizer.convert_tokens_to_ids('<IMG_END>')
-    VOCAB_OFFSET = len(tokenizer) 
-    
+    VOCAB_OFFSET = len(tokenizer)
+
     print(f"IDs: START={IMG_START_ID}, END={IMG_END_ID}, OFFSET={VOCAB_OFFSET}")
-    
+
+    entries = {}
+    for split in SPLITS:
+        with open(os.path.join(args.data, f"{split}.jsonl"), "r") as f:
+            entries[split] = [json.loads(line) for line in f]
+
+    # LEAKAGE CHECK: datafactory splits by configuration, so no test prompt may be in train/val
+    prompts = {split: {e['prompt'] for e in rows} for split, rows in entries.items()}
+    assert not prompts["test"] & (prompts["train"] | prompts["val"]), "Test prompt found in train/val!"
+
     # 2. Process Data
     vqgan = load_vqgan()
-    processed_samples = []
-    
-    with open(os.path.join(DATA_DIR, "dataset.jsonl"), "r") as f:
-        lines = f.readlines()
-        
-    print(f"Processing {len(lines)} samples...")
-    for line in tqdm(lines):
-        entry = json.loads(line)
-        
-        # Helper to skip bad images
-        img_indices = preprocess_image(entry['image_path'], vqgan)
-        if img_indices is None: continue 
-        
-        prompt_ids = tokenizer.encode(entry['prompt'])
-        answer_ids = tokenizer.encode(" " + entry['answer'])
-        
-        shifted_img_indices = [idx + VOCAB_OFFSET for idx in img_indices]
-        
-        full_sequence = (
-            prompt_ids + 
-            [IMG_START_ID] + 
-            shifted_img_indices + 
-            [IMG_END_ID] + 
-            answer_ids
-        )
-        processed_samples.append(torch.tensor(full_sequence, dtype=torch.long))
-        
-        # --- SANITY CHECKS (First Sample Only) ---
-        if len(processed_samples) == 1:
-            print(f"\n--- SANITY CHECK: First Sample ---")
-            print(f"Full Sequence Length: {len(full_sequence)}")
-            
-            # Find image block
-            try:
-                start_idx = full_sequence.index(IMG_START_ID) + 1
-                end_idx = full_sequence.index(IMG_END_ID)
-                img_block = full_sequence[start_idx:end_idx]
-                
-                print(f"Image Tokens: {len(img_block)}")
-                img_min, img_max = min(img_block), max(img_block)
-                print(f"Image Token Range: [{img_min}, {img_max}]")
-                
-                # Assertions
-                assert len(img_block) == 256, f"Expected 256 image tokens, got {len(img_block)}"
-                assert img_min >= VOCAB_OFFSET, f"Image token {img_min} is below offset {VOCAB_OFFSET}"
-                assert img_max < VOCAB_OFFSET + 16384, f"Image token {img_max} is out of range"
-                print("All checks passed for first sample!\n")
-            except Exception as e:
-                print(f"Sanity check failed: {e}")
-                import sys; sys.exit(1)
+    os.makedirs(args.out, exist_ok=True)
 
-    # 3. Save with METADATA
-    print("Saving to .pt file...")
-    torch.save({
-        "samples": processed_samples,
-        "meta": {
-            "vocab_size_total": VOCAB_OFFSET + 16384,
-            "img_start_id": IMG_START_ID,
-            "img_end_id": IMG_END_ID,
-            "vocab_offset": VOCAB_OFFSET,
-            "block_image_tokens": 256
-        }
-    }, OUTPUT_FILE)
-    print(f"Saved {len(processed_samples)} samples to {OUTPUT_FILE}")
+    for split in SPLITS:
+        processed_samples = []
+        print(f"Processing {len(entries[split])} {split} samples...")
+        for entry in tqdm(entries[split]):
+
+            # Helper to skip bad images
+            img_indices = preprocess_image(os.path.join(args.data, entry['image_path']), vqgan)
+            if img_indices is None: continue
+
+            prompt_ids = tokenizer.encode(entry['prompt'])
+            answer_ids = tokenizer.encode(" " + entry['answer'])
+
+            shifted_img_indices = [idx + VOCAB_OFFSET for idx in img_indices]
+
+            full_sequence = (
+                prompt_ids +
+                [IMG_START_ID] +
+                shifted_img_indices +
+                [IMG_END_ID] +
+                answer_ids
+            )
+            processed_samples.append({
+                "id": entry['id'],
+                "tokens": torch.tensor(full_sequence, dtype=torch.long),
+                # Explicit indices into tokens, so nothing downstream has to search for <IMG_START>
+                "loss_start": len(prompt_ids) + 1,  # first predicted token (the first image token)
+                "answer_start": len(full_sequence) - len(answer_ids),
+                "config": entry['config'],
+                "label": entry['answer'],
+            })
+
+            # --- SANITY CHECKS (First Sample Only) ---
+            if len(processed_samples) == 1:
+                print(f"\n--- SANITY CHECK: First Sample ---")
+                print(f"Full Sequence Length: {len(full_sequence)}")
+                
+                # Find image block
+                try:
+                    start_idx = full_sequence.index(IMG_START_ID) + 1
+                    end_idx = full_sequence.index(IMG_END_ID)
+                    img_block = full_sequence[start_idx:end_idx]
+                    
+                    print(f"Image Tokens: {len(img_block)}")
+                    img_min, img_max = min(img_block), max(img_block)
+                    print(f"Image Token Range: [{img_min}, {img_max}]")
+                    
+                    # Assertions
+                    assert len(img_block) == 256, f"Expected 256 image tokens, got {len(img_block)}"
+                    assert img_min >= VOCAB_OFFSET, f"Image token {img_min} is below offset {VOCAB_OFFSET}"
+                    assert img_max < VOCAB_OFFSET + 16384, f"Image token {img_max} is out of range"
+                    print("All checks passed for first sample!\n")
+                except Exception as e:
+                    print(f"Sanity check failed: {e}")
+                    import sys; sys.exit(1)
+
+        # 3. Save with METADATA
+        out_path = os.path.join(args.out, f"{split}.pt")
+        print(f"Saving to {out_path}...")
+        torch.save({
+            "samples": processed_samples,
+            "meta": {
+                "vocab_size_total": VOCAB_OFFSET + 16384,
+                "img_start_id": IMG_START_ID,
+                "img_end_id": IMG_END_ID,
+                "vocab_offset": VOCAB_OFFSET,
+                "block_image_tokens": 256
+            }
+        }, out_path)
+        print(f"Saved {len(processed_samples)} samples to {out_path}")
 
 if __name__ == "__main__":
     main()

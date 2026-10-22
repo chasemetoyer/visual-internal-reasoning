@@ -8,9 +8,16 @@ We propose a unified decoder-only architecture in which discrete image tokens, o
 
 Our results demonstrate that models trained with forced internal visual intermediates outperform text-only baselines on spatial reasoning tasks and exhibit significant performance degradation when the imagined visual tokens are disrupted (Blindfold Accuracy: 57.0% vs. Imagined Accuracy: 90.5%), indicating that the visual representation is causally utilized.
 
+> **Superseded:** the numbers in this abstract come from the results table below, which is not valid. See the note under [Key Findings](#key-findings-n200).
+
 ---
 
 ## **Key Findings (N=200)**
+
+> **Superseded — do not cite.** This table is kept for the record only. It is not valid because:
+> - It was measured on training questions: the evaluation sampled its items from `train_data_final.pt`, the same file the model was trained on.
+>
+> Re-run the pipeline in [Getting Started](#getting-started) for valid numbers.
 
 We evaluated the model on a "Forced Choice" spatial reasoning task (*"Does the Red Square overlap the Blue Circle?"*). The results demonstrate a clear causal dependency on the internal visual state.
 
@@ -40,10 +47,10 @@ This research investigates three core claims regarding multimodal reasoning in t
 
 ```plaintext
 .
-├── dataset_imagination_balanced/ # Synthetic data generation output
+├── dataset_imagination_v2/       # Synthetic data: images + train/val/test.jsonl
+├── processed_v2/                 # Preprocessed splits: train.pt, val.pt, test.pt (tokens + VQ indices + metadata)
+├── checkpoints/                  # Trained model weights
 ├── taming/                       # VQGAN dependencies (Taming Transformers)
-├── train_data_final.pt           # Preprocessed dataset (Tokenized Text + VQ Indices)
-├── imaginer_final.pth            # Trained Model Weights (30k iters)
 ├── vqgan_imagenet_f16_16384.* # VQGAN Checkpoint & Config
 │
 ├── src/
@@ -121,35 +128,35 @@ If the `.ckpt` is only a few KB, the download failed; retry. Run all scripts fro
 
 ### **1. Data Generation**
 
-Generate the synthetic spatial reasoning dataset (100k samples).
+Generate the synthetic spatial reasoning dataset (100k samples). Each unique configuration (square start, circle position, move) is assigned to train, val or test (90/5/5, fixed seed), so a prompt rendered several times with different noise lines always stays in one split and no test prompt appears in train or val. The output directory must be new or empty.
 
 ```bash
-python src/datafactory.py --size 100000
+python src/datafactory.py --size 100000 --seed 0 --out dataset_imagination_v2
 ```
 
 ### **2. Preprocessing**
 
-Tokenize text and encode images into discrete VQGAN indices.
+Tokenize text and encode images into discrete VQGAN indices. Writes one file per split (`train.pt`, `val.pt`, `test.pt`), storing each sample's configuration, label and loss-start index alongside its tokens.
 *Note: Requires the VQGAN weights (see [VQGAN Weights](#vqgan-weights)).*
 
 ```bash
-python src/preprocess.py
+python src/preprocess.py --data dataset_imagination_v2 --out processed_v2
 ```
 
 ### **3. Training**
 
-Train the autoregressive transformer.
+Train the autoregressive transformer on the train split. Every 1,000 iterations it logs validation loss over all trained tokens and over the answer token alone.
 
 ```bash
-python src/train_imaginer.py
+python src/train_imaginer.py --data processed_v2 --out-dir checkpoints
 ```
 
 ### **4. Evaluation**
 
-Run the rigorous forced-choice evaluation suite.
+Run the forced-choice evaluation on the held-out test split. It scores `--n` items with distinct configurations (default 1,000; repeated renders of one prompt are not independent) in the test split's class mix, and reports each accuracy with a 95% Wilson confidence interval, plus the majority-class baseline.
 
 ```bash
-python evaluation/evaluate_rigorous.py
+python evaluation/evaluate_rigorous.py --data processed_v2 --image-ckpt checkpoints/imaginer_final.pth --n 1000
 ```
 
 ---

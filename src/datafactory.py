@@ -1,16 +1,18 @@
 import os
 import random
 import json
+import argparse
 import numpy as np
 from PIL import Image, ImageDraw
 
 # --- CONFIGURATION ---
-DATASET_SIZE = 100000  # Total samples (will be 1000 Yes, 1000 No)
-OUTPUT_DIR = "dataset_imagination_balanced"
+DATASET_SIZE = 100000  # Default total samples (half Yes, half No); override with --size
+OUTPUT_DIR = "dataset_imagination_v2"  # Default --out
 IMG_SIZE = 256
 GRID_SCALE = 10
 OBJ_SIZE = 20
 UNIT_PX = IMG_SIZE // GRID_SCALE  # Pixels per grid unit (approx 25)
+SPLITS = {"train": 0.90, "val": 0.05, "test": 0.05}  # Fractions of unique configurations
 
 # Setup Colors
 COLORS = { "red": (255, 0, 0), "blue": (0, 0, 255) }
@@ -58,7 +60,7 @@ def get_valid_coordinate():
     margin = OBJ_SIZE + 5
     return random.randint(margin, IMG_SIZE - margin)
 
-def generate_sample(sample_id, force_overlap):
+def generate_sample(sample_id, force_overlap, out_dir):
     """
     force_overlap (bool): If True, we engineer the start pos so they collide.
                           If False, we ensure they DO NOT collide.
@@ -122,7 +124,7 @@ def generate_sample(sample_id, force_overlap):
         mover_final = Shape(COLORS["red"], final_mover_x, final_mover_y, "square")
         
         # Render
-        img_filename = os.path.join(OUTPUT_DIR, "images", f"img_{sample_id:06d}.png")
+        img_filename = os.path.join(out_dir, "images", f"img_{sample_id:06d}.png")
         render_scene(anchor, mover_final, img_filename)
         
         # Text Prompt
@@ -138,41 +140,81 @@ def generate_sample(sample_id, force_overlap):
                   f"Move red square {dx} right, {dy} down. Overlap?")
         
         return {
+            "id": sample_id,
             "prompt": prompt,
-            "image_path": img_filename,
-            "answer": "Yes" if force_overlap else "No"
+            "image_path": os.path.relpath(img_filename, out_dir),  # relative to the dataset dir
+            "answer": "Yes" if force_overlap else "No",
+            # The configuration is everything the prompt states; splits are made over these
+            "config": {"square_start": [grid_start_x, grid_start_y],
+                       "circle": [grid_anchor_x, grid_anchor_y],
+                       "move": [dx, dy]},
         }
-        
+
     print("Warning: Could not generate valid sample after retries.")
     return None
 
+def config_key(config):
+    return (tuple(config["square_start"]), tuple(config["circle"]), tuple(config["move"]))
+
+def split_configs(keys, seed):
+    """Assigns each unique configuration to train/val/test (90/5/5), shuffled with a fixed seed."""
+    keys = sorted(set(keys))
+    random.Random(seed).shuffle(keys)
+    n_val = round(len(keys) * SPLITS["val"])
+    n_test = round(len(keys) * SPLITS["test"])
+    return {k: "test" if i < n_test else "val" if i < n_test + n_val else "train"
+            for i, k in enumerate(keys)}
+
 # --- MAIN LOOP ---
 if __name__ == "__main__":
-    if os.path.exists(OUTPUT_DIR):
-        import shutil
-        shutil.rmtree(OUTPUT_DIR) # Clear old data
-    os.makedirs(os.path.join(OUTPUT_DIR, "images"))
-    
-    print(f"Generating {DATASET_SIZE} balanced samples...")
-    
+    parser = argparse.ArgumentParser(description="Generate the synthetic overlap dataset (train/val/test).")
+    parser.add_argument("--size", type=int, default=DATASET_SIZE, help="total number of samples")
+    parser.add_argument("--seed", type=int, default=0, help="seed for sampling, noise lines and the split")
+    parser.add_argument("--out", default=OUTPUT_DIR, help="output directory (must be new or empty)")
+    args = parser.parse_args()
+
+    # Never clear an existing directory: --out is user-supplied
+    if os.path.isdir(args.out) and os.listdir(args.out):
+        raise SystemExit(f"{args.out} exists and is not empty; delete it or pass a different --out.")
+    os.makedirs(os.path.join(args.out, "images"), exist_ok=True)
+    random.seed(args.seed)
+
+    print(f"Generating {args.size} balanced samples...")
+
     data_list = []
-    
-    for i in range(DATASET_SIZE):
+
+    for i in range(args.size):
         # Force 50/50 Split
         want_overlap = (i % 2 == 0)
-        
-        sample = generate_sample(i, want_overlap)
+
+        sample = generate_sample(i, want_overlap, args.out)
         if sample:
             data_list.append(sample)
-            
+
         if i % 100 == 0:
-            print(f"Progress: {i}/{DATASET_SIZE}", end="\r")
-            
-    # Shuffle the final list so the model doesn't learn "Yes, No, Yes, No" pattern
-    random.shuffle(data_list)
-    
-    with open(os.path.join(OUTPUT_DIR, "dataset.jsonl"), "w") as f:
-        for entry in data_list:
-            f.write(json.dumps(entry) + "\n")
-            
-    print(f"\nCompleted! Saved to {OUTPUT_DIR}")
+            print(f"Progress: {i}/{args.size}", end="\r")
+
+    # Split by configuration, not by sample: one prompt can be rendered many times with
+    # different noise lines, and every rendering of it must land in the same split.
+    split_of = split_configs([config_key(s["config"]) for s in data_list], args.seed)
+    splits = {name: [] for name in SPLITS}
+    for s in data_list:
+        s["split"] = split_of[config_key(s["config"])]
+        splits[s["split"]].append(s)
+
+    # LEAKAGE CHECK: no test prompt may appear in train or val (and no val prompt in train)
+    prompts = {name: {s["prompt"] for s in rows} for name, rows in splits.items()}
+    assert not prompts["test"] & (prompts["train"] | prompts["val"]), "Test prompt leaked into train/val!"
+    assert not prompts["val"] & prompts["train"], "Val prompt leaked into train!"
+
+    print()
+    for name, rows in splits.items():
+        # Shuffle so the model doesn't learn "Yes, No, Yes, No" pattern
+        random.shuffle(rows)
+        with open(os.path.join(args.out, f"{name}.jsonl"), "w") as f:
+            for entry in rows:
+                f.write(json.dumps(entry) + "\n")
+        n_yes = sum(s["answer"] == "Yes" for s in rows)
+        print(f"{name}: {len(rows)} samples ({n_yes} Yes) from {len(prompts[name])} configurations")
+
+    print(f"Completed! Saved to {args.out}")

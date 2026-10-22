@@ -4,9 +4,12 @@ from torch.nn import functional as F
 from torch.utils.data import Dataset, DataLoader
 import math
 import time
+import os
+import argparse
 
 # --- CONFIGURATION ---
-DATA_PATH = "train_data_final.pt" # Updated filename
+DATA_DIR = "processed_v2" # Default --data: train.pt / val.pt written by preprocess.py
+OUT_DIR = "checkpoints" # Default --out-dir
 BATCH_SIZE = 8 # Keep this low for Mac/MPS stability
 BLOCK_SIZE = 512 # Context window size
 LEARNING_RATE = 3e-4 # Learning rate
@@ -30,31 +33,35 @@ class ImaginationDataset(Dataset):
         self.img_start_id = self.meta['img_start_id']
         self.img_end_id = self.meta['img_end_id']
         
-        print(f"Loaded Data. Vocab: {self.vocab_size}, START: {self.img_start_id}")
+        print(f"Loaded {len(self.samples)} samples from {pt_path}. Vocab: {self.vocab_size}, START: {self.img_start_id}")
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        seq = self.samples[idx]
+        s = self.samples[idx]
+        seq, loss_start, answer_start = s["tokens"], s["loss_start"], s["answer_start"]
         if len(seq) > BLOCK_SIZE:
-            seq = seq[-BLOCK_SIZE:]
+            cut = len(seq) - BLOCK_SIZE
+            seq = seq[cut:]
+            loss_start, answer_start = max(loss_start - cut, 1), max(answer_start - cut, 1)
 
         x = seq[:-1].clone()
         y = seq[1:].clone()
 
-        # Mask Prompt using the LOADED ID
-        img_start_pos = (x == self.img_start_id).nonzero(as_tuple=True)[0]
-        if len(img_start_pos) > 0:
-            p = img_start_pos[0].item()
-            y[:p] = -100 # IGNORE_INDEX
+        # Mask Prompt using the STORED loss-start index (y[j] is the target for seq[j + 1])
+        y[:loss_start - 1] = -100 # IGNORE_INDEX
+        # Answer-only targets: the one loss that is comparable across sequence formats
+        a = y.clone()
+        a[:answer_start - 1] = -100
         
         pad_len = BLOCK_SIZE - len(x)
         if pad_len > 0:
             x = torch.cat([x, torch.full((pad_len,), 0, dtype=torch.long)])
             y = torch.cat([y, torch.full((pad_len,), -100, dtype=torch.long)])
+            a = torch.cat([a, torch.full((pad_len,), -100, dtype=torch.long)])
             
-        return x, y
+        return x, y, a
 
 # --- 2. MODEL (Standard) ---
 class GPT(nn.Module):
@@ -126,22 +133,53 @@ class GPTConfig:
         self.n_layer = n_layer; self.n_head = n_head; self.n_embd = n_embd
 
 # --- 3. TRAINING LOOP ---
+@torch.no_grad()
+def estimate_val_loss(model, loader):
+    """Token-averaged loss over the whole val split: (all trained tokens, answer tokens only)."""
+    model.eval()
+    sums, counts = [0.0, 0.0], [0, 0]
+    for xb, yb, ab in loader:
+        logits, _ = model(xb.to(DEVICE))
+        logits = logits.view(-1, logits.size(-1))
+        for k, targets in enumerate((yb, ab)):
+            targets = targets.to(DEVICE).view(-1)
+            sums[k] += F.cross_entropy(logits, targets, ignore_index=-100, reduction="sum").item()
+            counts[k] += (targets != -100).sum().item()
+    model.train()
+    return sums[0] / counts[0], sums[1] / counts[1]
+
 def main():
-    dataset = ImaginationDataset(DATA_PATH)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+    parser = argparse.ArgumentParser(description="Train the imaginer on the train split.")
+    parser.add_argument("--data", default=DATA_DIR, help="directory with train.pt and val.pt")
+    parser.add_argument("--out-dir", default=OUT_DIR, help="where checkpoints are written")
+    parser.add_argument("--max-iters", type=int, default=MAX_ITERS)
+    parser.add_argument("--val-interval", type=int, default=VAL_INTERVAL)
+    parser.add_argument("--seed", type=int, default=0, help="seed for weight init and batch order")
+    args = parser.parse_args()
+
+    # Train on the train split only; val is for monitoring, test is never touched here
+    dataset = ImaginationDataset(os.path.join(args.data, "train.pt"))
+    val_dataset = ImaginationDataset(os.path.join(args.data, "val.pt"))
+    assert val_dataset.meta == dataset.meta, "train.pt and val.pt were built with different vocabularies"
+
+    torch.manual_seed(args.seed)
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True,
+                            generator=torch.Generator().manual_seed(args.seed))
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
     
     config = GPTConfig(vocab_size=dataset.vocab_size, block_size=BLOCK_SIZE)
     model = GPT(config).to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    os.makedirs(args.out_dir, exist_ok=True)
     
     iter_num = 0
     model.train()
     start = time.time()
     
     print("Starting Training...")
-    while iter_num < MAX_ITERS:
-        for xb, yb in dataloader:
-            if iter_num >= MAX_ITERS: break
+    while iter_num < args.max_iters:
+        for xb, yb, _ in dataloader:
+            if iter_num >= args.max_iters: break
             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
             
             # CRITICAL CHECK: Max ID
@@ -161,16 +199,25 @@ def main():
             
             # --- PROGRESS SAVING ---
             if iter_num > 0 and iter_num % SAVE_INTERVAL == 0:
-                checkpoint_name = f"imaginer_ckpt_{iter_num}.pth"
+                checkpoint_name = os.path.join(args.out_dir, f"imaginer_ckpt_{iter_num}.pth")
                 torch.save(model.state_dict(), checkpoint_name)
                 print(f"--> Saved backup: {checkpoint_name}")
             
             if iter_num % 100 == 0:
                 print(f"Iter {iter_num}: Loss {loss.item():.4f}")
+
+            # --- VALIDATION ---
+            if iter_num > 0 and iter_num % args.val_interval == 0:
+                val_loss, val_answer_loss = estimate_val_loss(model, val_loader)
+                print(f"Iter {iter_num}: Val loss {val_loss:.4f} | Val answer loss {val_answer_loss:.4f}")
             iter_num += 1
 
     print(f"Done in {time.time()-start:.1f}s")
-    torch.save(model.state_dict(), "imaginer_final.pth")
+    val_loss, val_answer_loss = estimate_val_loss(model, val_loader)
+    print(f"Final: Val loss {val_loss:.4f} | Val answer loss {val_answer_loss:.4f}")
+    final_name = os.path.join(args.out_dir, "imaginer_final.pth")
+    torch.save(model.state_dict(), final_name)
+    print(f"Saved {final_name}")
 
 if __name__ == "__main__":
     main()
