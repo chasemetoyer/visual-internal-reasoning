@@ -58,7 +58,8 @@ class ImaginationDataset(Dataset):
 
         # Mask Prompt using the STORED loss-start index (y[j] is the target for seq[j + 1])
         y[:loss_start - 1] = -100 # IGNORE_INDEX
-        # Answer-only targets: the one loss that is comparable across sequence formats
+        # Answer-only targets. Their loss compares text vs filler; in the image format the answer is predicted
+        # with the true picture in the input (teacher forcing), so it is a ceiling, not a comparable number
         a = y.clone()
         a[:answer_start - 1] = -100
         return x, y, a

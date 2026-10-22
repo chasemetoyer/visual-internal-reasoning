@@ -194,7 +194,7 @@ python src/preprocess.py --data dataset_imagination_v2 --out processed_v2
 
 ### **3. Training**
 
-Train one model per format (see [Baselines](#4-baselines)) on the train split, with identical settings. Every 1,000 iterations each run logs validation loss over all trained tokens and over the answer token alone; the answer loss is the one that is comparable across formats.
+Train one model per format (see [Baselines](#4-baselines)) on the train split, with identical settings. Every 1,000 iterations each run logs validation loss over all trained tokens and over the answer token alone. Use the answer loss to compare the text and filler models only. The image model predicts its validation answer with the true picture already in its input (teacher forcing), so its answer loss is near zero whether or not it can imagine the picture. Compare it with the other two through the evaluation's imagined rows.
 
 ```bash
 python src/train_imaginer.py --format image  --data processed_v2 --out-dir checkpoints
