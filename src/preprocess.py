@@ -20,6 +20,7 @@ from taming.models.vqgan import VQModel
 DATA_DIR = "dataset_imagination_v2"  # Default --data (written by datafactory.py)
 OUTPUT_DIR = "processed_v2"          # Default --out: gets train.pt, val.pt, test.pt
 SPLITS = ("train", "val", "test")
+FORMATS = ("image", "text", "filler")  # Sequence layouts; train_imaginer.py --format picks one
 VQGAN_CONFIG = "vqgan_imagenet_f16_16384.yaml"
 VQGAN_CKPT = "vqgan_imagenet_f16_16384.ckpt"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
@@ -70,15 +71,16 @@ def main():
     parser.add_argument("--out", default=OUTPUT_DIR, help="output directory for train.pt / val.pt / test.pt")
     args = parser.parse_args()
 
-    # 1. Setup Tokenizer
+    # 1. Setup Tokenizer (one vocabulary shared by all three formats)
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
-    tokenizer.add_special_tokens({'additional_special_tokens': ['<IMG_START>', '<IMG_END>']})
+    tokenizer.add_special_tokens({'additional_special_tokens': ['<IMG_START>', '<IMG_END>', '<THINK>']})
 
     IMG_START_ID = tokenizer.convert_tokens_to_ids('<IMG_START>')
     IMG_END_ID = tokenizer.convert_tokens_to_ids('<IMG_END>')
+    THINK_ID = tokenizer.convert_tokens_to_ids('<THINK>')
     VOCAB_OFFSET = len(tokenizer)
 
-    print(f"IDs: START={IMG_START_ID}, END={IMG_END_ID}, OFFSET={VOCAB_OFFSET}")
+    print(f"IDs: START={IMG_START_ID}, END={IMG_END_ID}, THINK={THINK_ID}, OFFSET={VOCAB_OFFSET}")
 
     entries = {}
     for split in SPLITS:
@@ -114,12 +116,23 @@ def main():
                 [IMG_END_ID] +
                 answer_ids
             )
+            # Same prompt and answer in every format; only what sits between them differs.
+            # filler has the image format's length and compute, but no visual content.
+            sequences = {
+                "image": full_sequence,
+                "text": prompt_ids + answer_ids,
+                "filler": prompt_ids + [IMG_START_ID] + [THINK_ID] * len(shifted_img_indices) + [IMG_END_ID] + answer_ids,
+            }
             processed_samples.append({
                 "id": entry['id'],
-                "tokens": torch.tensor(full_sequence, dtype=torch.long),
-                # Explicit indices into tokens, so nothing downstream has to search for <IMG_START>
-                "loss_start": len(prompt_ids) + 1,  # first predicted token (the first image token)
-                "answer_start": len(full_sequence) - len(answer_ids),
+                "tokens": {fmt: torch.tensor(seq, dtype=torch.long) for fmt, seq in sequences.items()},
+                # Explicit indices into each format's tokens, so nothing downstream searches for <IMG_START>
+                "loss_start": {  # first predicted token
+                    "image": len(prompt_ids) + 1,  # the image tokens are generated, so they are trained
+                    "text": len(prompt_ids),  # answer only
+                    "filler": len(sequences["filler"]) - len(answer_ids),  # answer only: <THINK> is input, not predicted
+                },
+                "answer_start": {fmt: len(seq) - len(answer_ids) for fmt, seq in sequences.items()},
                 "config": entry['config'],
                 "label": entry['answer'],
             })
@@ -143,6 +156,8 @@ def main():
                     assert len(img_block) == 256, f"Expected 256 image tokens, got {len(img_block)}"
                     assert img_min >= VOCAB_OFFSET, f"Image token {img_min} is below offset {VOCAB_OFFSET}"
                     assert img_max < VOCAB_OFFSET + 16384, f"Image token {img_max} is out of range"
+                    assert len(sequences["filler"]) == len(full_sequence), "Filler and image formats differ in length"
+                    assert sequences["text"] == prompt_ids + answer_ids
                     print("All checks passed for first sample!\n")
                 except Exception as e:
                     print(f"Sanity check failed: {e}")
@@ -157,8 +172,10 @@ def main():
                 "vocab_size_total": VOCAB_OFFSET + 16384,
                 "img_start_id": IMG_START_ID,
                 "img_end_id": IMG_END_ID,
+                "think_id": THINK_ID,
                 "vocab_offset": VOCAB_OFFSET,
-                "block_image_tokens": 256
+                "block_image_tokens": 256,
+                "formats": list(FORMATS)
             }
         }, out_path)
         print(f"Saved {len(processed_samples)} samples to {out_path}")

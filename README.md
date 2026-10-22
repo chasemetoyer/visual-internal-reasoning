@@ -16,6 +16,7 @@ Our results demonstrate that models trained with forced internal visual intermed
 
 > **Superseded — do not cite.** This table is kept for the record only. It is not valid because:
 > - It was measured on training questions: the evaluation sampled its items from `train_data_final.pt`, the same file the model was trained on.
+> - The "Text-Only" row was not a text-only baseline: it fed the image model `[prompt][IMG_START][IMG_END]`, an input it never saw in training.
 >
 > Re-run the pipeline in [Getting Started](#getting-started) for valid numbers.
 
@@ -102,6 +103,18 @@ To verify H2 (Necessity), we perform an intervention at inference time:
 3. Force the model to predict $y_{answer}$ conditioned on $v_{noise}$.
 Collapse in performance confirms the answer $y_{answer}$ is downstream of the visual state $v$.
 
+### **4. Baselines**
+
+Three models are trained identically (same architecture, hyperparameters, training split and number of steps) and share one vocabulary. Only the sequence format differs:
+
+| Format | Sequence | Loss on |
+| --- | --- | --- |
+| `image` | prompt, `<IMG_START>`, 256 image tokens, `<IMG_END>`, answer | image tokens, `<IMG_END>`, answer |
+| `text` | prompt, answer | answer |
+| `filler` | prompt, `<IMG_START>`, 256 × `<THINK>`, `<IMG_END>`, answer | answer |
+
+The filler model has the image model's sequence length and compute but no visual content, so it separates the effect of the picture from the effect of extra tokens. All three models are scored on the same test items. The image model with its picture removed (`[prompt][IMG_START][IMG_END]`) is still reported, but that input is out of distribution, so it is not a text-only baseline.
+
 ---
 
 ## **Getting Started**
@@ -145,18 +158,23 @@ python src/preprocess.py --data dataset_imagination_v2 --out processed_v2
 
 ### **3. Training**
 
-Train the autoregressive transformer on the train split. Every 1,000 iterations it logs validation loss over all trained tokens and over the answer token alone.
+Train one model per format (see [Baselines](#4-baselines)) on the train split, with identical settings. Every 1,000 iterations each run logs validation loss over all trained tokens and over the answer token alone; the answer loss is the one that is comparable across formats.
 
 ```bash
-python src/train_imaginer.py --data processed_v2 --out-dir checkpoints
+python src/train_imaginer.py --format image  --data processed_v2 --out-dir checkpoints
+python src/train_imaginer.py --format text   --data processed_v2 --out-dir checkpoints
+python src/train_imaginer.py --format filler --data processed_v2 --out-dir checkpoints
 ```
 
 ### **4. Evaluation**
 
-Run the forced-choice evaluation on the held-out test split. It scores `--n` items with distinct configurations (default 1,000; repeated renders of one prompt are not independent) in the test split's class mix, and reports each accuracy with a 95% Wilson confidence interval, plus the majority-class baseline.
+Run the forced-choice evaluation on the held-out test split. It scores `--n` items with distinct configurations (default 1,000; repeated renders of one prompt are not independent) in the test split's class mix, runs every model on the same items, and reports each accuracy with a 95% Wilson confidence interval, plus the majority-class baseline. Any of the three checkpoints can be left out.
 
 ```bash
-python evaluation/evaluate_rigorous.py --data processed_v2 --image-ckpt checkpoints/imaginer_final.pth --n 1000
+python evaluation/evaluate_rigorous.py --data processed_v2 --n 1000 \
+    --image-ckpt checkpoints/imaginer_image_final.pth \
+    --text-ckpt checkpoints/imaginer_text_final.pth \
+    --filler-ckpt checkpoints/imaginer_filler_final.pth
 ```
 
 ---

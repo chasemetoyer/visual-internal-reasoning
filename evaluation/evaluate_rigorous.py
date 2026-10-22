@@ -75,25 +75,35 @@ def select_items(samples, n, seed):
 def evaluate():
     parser = argparse.ArgumentParser(description="Forced-choice evaluation on the held-out test split.")
     parser.add_argument("--data", default=DATA_DIR, help="directory with test.pt from preprocess.py")
-    parser.add_argument("--image-ckpt", required=True, help="checkpoint of the model trained with image tokens")
+    parser.add_argument("--image-ckpt", help="model trained on prompt, image tokens, answer")
+    parser.add_argument("--text-ckpt", help="model trained on prompt, answer")
+    parser.add_argument("--filler-ckpt", help="model trained on prompt, 256 <THINK> tokens, answer")
     parser.add_argument("--n", type=int, default=NUM_SAMPLES, help="number of distinct test items to score")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    ckpts = {"image": args.image_ckpt, "text": args.text_ckpt, "filler": args.filler_ckpt}
+    ckpts = {fmt: path for fmt, path in ckpts.items() if path}
+    if not ckpts:
+        parser.error("pass at least one of --image-ckpt, --text-ckpt, --filler-ckpt")
 
     # Reproducibility
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
     test_path = os.path.join(args.data, "test.pt")
-    print(f"Loading {args.image_ckpt} and {test_path}...")
+    print(f"Loading {test_path}...")
     data = torch.load(test_path, weights_only=False)
     samples = data['samples']
     meta = data['meta']
     
-    config = GPTConfig(vocab_size=meta['vocab_size_total'], block_size=BLOCK_SIZE)
-    model = GPT(config)
-    model.load_state_dict(torch.load(args.image_ckpt, map_location=DEVICE, weights_only=False))
-    model.eval().to(DEVICE)
+    # All formats share one vocabulary, so every model has the same shape
+    models = {}
+    for fmt, path in ckpts.items():
+        print(f"Loading {fmt} model from {path}...")
+        config = GPTConfig(vocab_size=meta['vocab_size_total'], block_size=BLOCK_SIZE)
+        model = GPT(config)
+        model.load_state_dict(torch.load(path, map_location=DEVICE, weights_only=False))
+        models[fmt] = model.eval().to(DEVICE)
     
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
     yes_ids, no_ids = tokenizer.encode(" Yes"), tokenizer.encode(" No")
@@ -103,8 +113,9 @@ def evaluate():
     indices = select_items(samples, args.n, args.seed)
     
     results = {
-        "teacher": 0, "blindfold": 0, "text_only": 0, 
+        "teacher": 0, "blindfold": 0, "picture_removed": 0, 
         "imagined_greedy": 0, "imagined_sampled": 0,
+        "text_model": 0, "filler_model": 0,
         "total_valid": 0, "gt_yes_count": 0
     }
     
@@ -113,20 +124,31 @@ def evaluate():
 
     for i, idx in enumerate(tqdm(indices)):
         s = samples[idx]
-        seq = s['tokens'].to(DEVICE).unsqueeze(0)
-        
-        # Parse Sequence with the stored index: [prompt <IMG_START>] [256 image tokens] [<IMG_END>] [answer]
-        ls = s['loss_start']
-        prompt_part = seq[:, :ls] 
-        real_image_part = seq[:, ls : ls + IMG_TOKENS]
-        end_part = seq[:, ls + IMG_TOKENS : ls + IMG_TOKENS + 1]
-        assert end_part.item() == meta['img_end_id'], "Unexpected sequence layout"
         
         # Ground truth comes from the stored label
         true_token = yes_id if s['label'] == "Yes" else no_id
             
         results["total_valid"] += 1
         if true_token == yes_id: results["gt_yes_count"] += 1
+
+        # --- BASELINES: models trained without pictures, on the same items ---
+        # Each input is its format's tokens up to the stored loss-start index (where the answer comes next)
+        for fmt, key in (("text", "text_model"), ("filler", "filler_model")):
+            if fmt in models:
+                baseline_input = s['tokens'][fmt][:s['loss_start'][fmt]].to(DEVICE).unsqueeze(0)
+                if get_answer_probs_stable(models[fmt], baseline_input, yes_id, no_id) == true_token:
+                    results[key] += 1
+
+        if "image" not in models: continue
+        model = models["image"]
+        seq = s['tokens']['image'].to(DEVICE).unsqueeze(0)
+        
+        # Parse Sequence with the stored index: [prompt <IMG_START>] [256 image tokens] [<IMG_END>] [answer]
+        ls = s['loss_start']['image']
+        prompt_part = seq[:, :ls] 
+        real_image_part = seq[:, ls : ls + IMG_TOKENS]
+        end_part = seq[:, ls + IMG_TOKENS : ls + IMG_TOKENS + 1]
+        assert end_part.item() == meta['img_end_id'], "Unexpected sequence layout"
         
         # --- TEST 1: TEACHER FORCED (Ceiling) ---
         teacher_input = torch.cat((prompt_part, real_image_part, end_part), dim=1)
@@ -139,10 +161,11 @@ def evaluate():
         if get_answer_probs_stable(model, blind_input, yes_id, no_id) == true_token:
             results["blindfold"] += 1
             
-        # --- TEST 3: TEXT-ONLY (Just Prompt + Start/End) ---
-        text_only_input = torch.cat((prompt_part, end_part), dim=1)
-        if get_answer_probs_stable(model, text_only_input, yes_id, no_id) == true_token:
-            results["text_only"] += 1
+        # --- TEST 3: PICTURE REMOVED (Just Prompt + Start/End) ---
+        # Out of distribution: the image model never trained without a picture. Not a text-only baseline.
+        picture_removed_input = torch.cat((prompt_part, end_part), dim=1)
+        if get_answer_probs_stable(model, picture_removed_input, yes_id, no_id) == true_token:
+            results["picture_removed"] += 1
 
         # --- TEST 4: IMAGINED (Greedy) ---
         curr_input = prompt_part
@@ -187,23 +210,31 @@ def evaluate():
         """Prints accuracy with its 95% Wilson interval and returns the accuracy in %."""
         lo, hi = wilson_ci(results[key], total)
         acc = results[key]/total*100
-        print(f"{name:<34}{acc:6.1f}%   95% CI [{lo*100:5.1f}, {hi*100:5.1f}]")
+        print(f"{name:<54}{acc:6.1f}%   95% CI [{lo*100:5.1f}, {hi*100:5.1f}]")
         return acc
 
-    print("\n" + "="*66)
-    print(f"SCIENTIFIC RESULTS (N={total} distinct test items)")
-    print("="*66)
+    print("\n" + "="*86)
+    print(f"SCIENTIFIC RESULTS (N={total} distinct test items, same items for every model)")
+    print("="*86)
     print(f"Scored Items Balance (Yes %): {yes_rate:.1f}%  -> Majority Baseline {majority_baseline:.1f}% (Beat this to be useful)")
     print(f"Full Test Split (Yes %):      {split_yes_rate:.1f}%  -> Majority Baseline "
           f"{max(split_yes_rate, 100 - split_yes_rate):.1f}% ({len(samples)} samples)")
-    print("-" * 66)
-    acc_teach = report("Teacher Forced (Ceiling):", "teacher")
-    acc_blind = report("Blindfold (Noise):", "blindfold")
-    acc_text = report("Text-Only (No Image):", "text_only")
-    print("-" * 66)
-    acc_greedy = report("Imagined (Greedy):", "imagined_greedy")
-    acc_sampled = report(f"Imagined (Sampled T={TEMPERATURE}):", "imagined_sampled")
-    print("="*66)
+    if "image" in models:
+        print("-" * 86)
+        acc_teach = report("Image model, teacher forced (ceiling):", "teacher")
+        acc_blind = report("Image model, blindfold (VQ noise):", "blindfold")
+        report("Image model, picture removed (out of distribution):", "picture_removed")
+        print("-" * 86)
+        acc_greedy = report("Image model, imagined (greedy):", "imagined_greedy")
+        acc_sampled = report(f"Image model, imagined (sampled T={TEMPERATURE}):", "imagined_sampled")
+    if "text" in models or "filler" in models:
+        print("-" * 86)
+    if "text" in models:
+        report("Text model (prompt, answer):", "text_model")
+    if "filler" in models:
+        report("Filler model (prompt, 256 <THINK> tokens, answer):", "filler_model")
+    print("="*86)
+    if "image" not in models: return
     
     # VERDICT LOGIC
     print("\nVERDICT:")

@@ -16,6 +16,7 @@ LEARNING_RATE = 3e-4 # Learning rate
 MAX_ITERS = 30000 # SCALED UP: 2.5k -> 30k (This is roughly 2.5 epochs)
 VAL_INTERVAL = 1000 # Validate every 1000 iterations
 SAVE_INTERVAL = 5000 # Save every 5000 iterations
+FORMATS = ("image", "text", "filler") # Built by preprocess.py; identical training for all three
 
 if torch.cuda.is_available(): DEVICE = 'cuda'
 elif torch.backends.mps.is_available(): DEVICE = 'mps'
@@ -24,23 +25,25 @@ print(f"Using Device: {DEVICE}")
 
 # --- 1. DATASET WITH METADATA LOADING ---
 class ImaginationDataset(Dataset):
-    def __init__(self, pt_path):
+    def __init__(self, pt_path, fmt):
         data = torch.load(pt_path, weights_only=False)
         self.samples = data['samples']
         self.meta = data['meta'] # Load the Truth
+        self.fmt = fmt
+        assert fmt in self.meta['formats'], f"{pt_path} has no '{fmt}' format"
         
         self.vocab_size = self.meta['vocab_size_total']
         self.img_start_id = self.meta['img_start_id']
         self.img_end_id = self.meta['img_end_id']
         
-        print(f"Loaded {len(self.samples)} samples from {pt_path}. Vocab: {self.vocab_size}, START: {self.img_start_id}")
+        print(f"Loaded {len(self.samples)} samples from {pt_path} ({fmt} format). Vocab: {self.vocab_size}, START: {self.img_start_id}")
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         s = self.samples[idx]
-        seq, loss_start, answer_start = s["tokens"], s["loss_start"], s["answer_start"]
+        seq, loss_start, answer_start = s["tokens"][self.fmt], s["loss_start"][self.fmt], s["answer_start"][self.fmt]
         if len(seq) > BLOCK_SIZE:
             cut = len(seq) - BLOCK_SIZE
             seq = seq[cut:]
@@ -133,6 +136,21 @@ class GPTConfig:
         self.n_layer = n_layer; self.n_head = n_head; self.n_embd = n_embd
 
 # --- 3. TRAINING LOOP ---
+def check_loss_mask(dataset):
+    """CRITICAL CHECK: the trained targets of sample 0 are exactly what its format should predict."""
+    _, y, a = dataset[0]
+    targets, answer = y[y != -100], a[a != -100]
+    n_img = dataset.meta['block_image_tokens']
+    assert len(answer) >= 1 and torch.equal(targets[-len(answer):], answer)
+    if dataset.fmt == "image":
+        # The image tokens, <IMG_END>, then the answer
+        assert len(targets) == n_img + 1 + len(answer), f"image: {len(targets)} trained targets"
+        assert (targets[:n_img] >= dataset.meta['vocab_offset']).all() and targets[n_img] == dataset.img_end_id
+    else:
+        # text and filler: the answer only (the filler's <THINK> tokens are input, never targets)
+        assert torch.equal(targets, answer), f"{dataset.fmt}: {len(targets)} trained targets, expected the answer only"
+    print(f"Loss mask OK ({dataset.fmt}): {len(targets)} trained targets per sample, {len(answer)} of them the answer")
+
 @torch.no_grad()
 def estimate_val_loss(model, loader):
     """Token-averaged loss over the whole val split: (all trained tokens, answer tokens only)."""
@@ -150,6 +168,9 @@ def estimate_val_loss(model, loader):
 
 def main():
     parser = argparse.ArgumentParser(description="Train the imaginer on the train split.")
+    parser.add_argument("--format", required=True, choices=FORMATS,
+                        help="image: prompt, image tokens, answer | text: prompt, answer | "
+                             "filler: prompt, 256 <THINK> tokens, answer")
     parser.add_argument("--data", default=DATA_DIR, help="directory with train.pt and val.pt")
     parser.add_argument("--out-dir", default=OUT_DIR, help="where checkpoints are written")
     parser.add_argument("--max-iters", type=int, default=MAX_ITERS)
@@ -158,9 +179,10 @@ def main():
     args = parser.parse_args()
 
     # Train on the train split only; val is for monitoring, test is never touched here
-    dataset = ImaginationDataset(os.path.join(args.data, "train.pt"))
-    val_dataset = ImaginationDataset(os.path.join(args.data, "val.pt"))
+    dataset = ImaginationDataset(os.path.join(args.data, "train.pt"), args.format)
+    val_dataset = ImaginationDataset(os.path.join(args.data, "val.pt"), args.format)
     assert val_dataset.meta == dataset.meta, "train.pt and val.pt were built with different vocabularies"
+    check_loss_mask(dataset)
 
     torch.manual_seed(args.seed)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True,
@@ -199,7 +221,7 @@ def main():
             
             # --- PROGRESS SAVING ---
             if iter_num > 0 and iter_num % SAVE_INTERVAL == 0:
-                checkpoint_name = os.path.join(args.out_dir, f"imaginer_ckpt_{iter_num}.pth")
+                checkpoint_name = os.path.join(args.out_dir, f"imaginer_{args.format}_ckpt_{iter_num}.pth")
                 torch.save(model.state_dict(), checkpoint_name)
                 print(f"--> Saved backup: {checkpoint_name}")
             
@@ -215,7 +237,7 @@ def main():
     print(f"Done in {time.time()-start:.1f}s")
     val_loss, val_answer_loss = estimate_val_loss(model, val_loader)
     print(f"Final: Val loss {val_loss:.4f} | Val answer loss {val_answer_loss:.4f}")
-    final_name = os.path.join(args.out_dir, "imaginer_final.pth")
+    final_name = os.path.join(args.out_dir, f"imaginer_{args.format}_final.pth")
     torch.save(model.state_dict(), final_name)
     print(f"Saved {final_name}")
 
