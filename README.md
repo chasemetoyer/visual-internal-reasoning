@@ -6,13 +6,39 @@ Large language models (LLMs) exhibit strong performance on linguistic reasoning 
 
 We propose a unified decoder-only architecture in which discrete image tokens, obtained from a pretrained vector-quantized autoencoder (VQGAN), are incorporated directly into the model’s vocabulary alongside standard text tokens. The model is trained autoregressively to generate an intermediate sequence of image tokens—interpreted as an internal “imagined” visual state—prior to producing a textual answer.
 
-Our results demonstrate that models trained with forced internal visual intermediates outperform text-only baselines on spatial reasoning tasks and exhibit significant performance degradation when the imagined visual tokens are disrupted (Blindfold Accuracy: 57.0% vs. Imagined Accuracy: 90.5%), indicating that the visual representation is causally utilized.
+In a first run on 1,000 held-out test questions (data seed 0, training seed 0), the model that imagines the picture before answering is correct 96.5% of the time with greedy decoding, and 98.5% when it samples the picture. An identically trained text-only model gets 61.3%, and a model given 256 filler tokens in place of the picture gets 53.6%. Replacing or removing the imagined picture drops the image model to chance (50.0% and 48.3%), so its answers depend on the visual representation.
 
-> **Superseded:** the numbers in this abstract come from the results table below, which is not valid. See the note under [Key Findings](#key-findings-n200).
+> These are single-run results with open caveats; see [Results](#results-single-run). The original prototype's numbers (90.5% imagined vs. 57.0% blindfold) were not valid and are kept, marked superseded, under [Superseded: Original Prototype Results](#superseded-original-prototype-results-n200).
 
 ---
 
-## **Key Findings (N=200)**
+## **Results (Single Run)**
+
+Forced-choice evaluation on 1,000 held-out test items with distinct configurations: 500 Yes, 250 near-miss No and 250 far No, so the majority baseline is 50.0%. One run on the 100,000-sample dataset: data seed 0, training seed 0, 30,000 training steps per model. Every model is scored on the same items; brackets are 95% Wilson confidence intervals.
+
+| Model | Condition | Accuracy | 95% CI |
+| --- | --- | --- | --- |
+| Image | Teacher forced: ground-truth picture tokens (ceiling) | 100.0% | [99.6, 100.0] |
+| Image | Imagined, greedy: the model generates its own picture | **96.5%** | [95.2, 97.5] |
+| Image | Imagined, sampled (T = 0.8) | **98.5%** | [97.5, 99.1] |
+| Image | Blindfold: picture replaced with random VQ tokens | 50.0% | [46.9, 53.1] |
+| Image | Picture removed (out of distribution) | 48.3% | [45.2, 51.4] |
+| Text | Prompt, then answer | 61.3% | [58.2, 64.3] |
+| Filler | Prompt, 256 `<THINK>` tokens, then answer | 53.6% | [50.5, 56.7] |
+
+**What this shows.** On questions it never trained on, the model that imagines the picture before answering is far more accurate than identically trained models that answer directly or after 256 filler tokens. The gaps are far wider than the confidence intervals. With its picture replaced or removed, the image model falls to chance, so its answers depend on the picture rather than on a shortcut through the prompt text. The filler model shows that extra sequence length and compute alone barely help.
+
+**Caveats.**
+- **One run.** The intervals cover which test items were drawn, not training randomness. The text model was still escaping a plateau: it was at chance at step 12,000 and reached 61.3% by step 30,000. Its score is therefore sensitive to the training seed and step budget, and the comparison holds at a fixed budget of 30,000 steps. Replicate with other training and data seeds before citing.
+- **Picture or supervision?** The image model is trained on 256 picture tokens per example, while the text and filler models are trained on the answer token alone. The filler model controls for compute but not for that extra supervision, so these results do not yet show that the *visual* form of the intermediate is what helps. A text-scratchpad baseline that writes the square's final grid cell before answering would separate the two.
+- **Familiar pictures.** No test prompt is trained on, but every test picture (the square's final cell plus the circle's cell) also appears in training under a different prompt. The result shows generalization to new questions, not to unseen scenes.
+- **Greedy vs. sampled.** The intervals for the two imagined rows touch, so the difference between them is not established.
+
+Reproduce it with [`colab_pipeline.ipynb`](colab_pipeline.ipynb) (`QUICK_TEST = False`) or the commands in [Getting Started](#getting-started).
+
+---
+
+## **Superseded: Original Prototype Results (N=200)**
 
 > **Superseded — do not cite.** This table is kept for the record only. It is not valid because:
 > - It was measured on training questions: the evaluation sampled its items from `train_data_final.pt`, the same file the model was trained on.
@@ -26,7 +52,7 @@ Our results demonstrate that models trained with forced internal visual intermed
 >   - The prompts truncate positions to 25 px cells. The drawn square is on average 10.3 px (at most 24.7 px) from where its prompt puts it, and no sample has both shapes within 1 px of their prompt positions.
 > - The model had a residual-stream bug: `Block.forward` returned `x + mlp(ln2(x + attn(ln1(x))))`, so the attention output never entered the residual stream directly. Every checkpoint trained with it (all untagged `imaginer_*.pth` files) is invalid.
 >
-> Re-run the pipeline in [Getting Started](#getting-started) for valid numbers.
+> Valid numbers from the fixed pipeline are in [Results](#results-single-run).
 
 We evaluated the model on a "Forced Choice" spatial reasoning task (*"Does the Red Square overlap the Blue Circle?"*). The results demonstrate a clear causal dependency on the internal visual state.
 
