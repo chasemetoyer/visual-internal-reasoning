@@ -28,6 +28,13 @@ Forced-choice evaluation on 1,000 held-out test items with distinct configuratio
 
 **What this shows.** On questions it never trained on, the model that imagines the picture before answering is far more accurate than identically trained models that answer directly or after 256 filler tokens. The gaps are far wider than the confidence intervals. With its picture replaced or removed, the image model falls to chance, so its answers depend on the picture rather than on a shortcut through the prompt text. The filler model shows that extra sequence length and compute alone barely help.
 
+**Data and training.**
+- **Dataset:** generated with `--seed 0`. It has 90,000 training, 5,000 validation and 5,000 test samples, drawn from 45,540, 2,530 and 2,530 distinct configurations.
+- **Audit:** running `src/audit_datafactory.py` on that exact dataset found no failures on any invariant across all 100,000 images. The dataset is exactly 50.0% Yes, near misses make up 50.0% of the No samples, and no test prompt appears in train or val.
+- **Training settings:** the same for all three models: batch size 8, learning rate 3e-4, training seed 0, 30,000 steps.
+- **Image model:** its 30,000 steps took 736 s on a Colab GPU, and its validation loss fell from 3.45 at step 1,000 to 1.94 at the end. Its validation answer loss reached 0.0007, but that number is teacher-forced (the true picture is in the input), so it is not comparable with the other two models.
+- **Text model:** its validation answer loss stayed at about 0.69 (ln 2, the loss of a 50/50 guess) through at least step 12,000.
+
 **Caveats.**
 - **One run.** The intervals cover which test items were drawn, not training randomness. The text model was still escaping a plateau: it was at chance at step 12,000 and reached 61.3% by step 30,000. Its score is therefore sensitive to the training seed and step budget, and the comparison holds at a fixed budget of 30,000 steps. Replicate with other training and data seeds before citing.
 - **Picture or supervision?** The image model is trained on 256 picture tokens per example, while the text and filler models are trained on the answer token alone. The filler model controls for compute but not for that extra supervision, so these results do not yet show that the *visual* form of the intermediate is what helps. A text-scratchpad baseline that writes the square's final grid cell before answering would separate the two.
