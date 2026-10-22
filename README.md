@@ -38,7 +38,7 @@ Forced-choice evaluation on 1,000 held-out test items with distinct configuratio
 
 **Caveats.**
 - **One run.** The intervals cover which test items were drawn, not training randomness. The text model was still escaping a plateau: its validation answer loss sat at chance until step 21,000 and was still falling when training stopped at step 30,000. Its score is therefore sensitive to the training seed and step budget, and the comparison holds at a fixed budget of 30,000 steps. Replicate with other training and data seeds before citing.
-- **Picture or supervision?** The image model is trained on 256 picture tokens per example, while the text and filler models are trained on the answer token alone. The filler model controls for compute but not for that extra supervision, so these results do not yet show that the *visual* form of the intermediate is what helps. A text-scratchpad baseline that writes the square's final grid cell before answering would separate the two.
+- **Picture or supervision?** The image model is trained on 256 picture tokens per example, while the text and filler models are trained on the answer token alone. The filler model controls for compute but not for that extra supervision, so these results do not yet show that the *visual* form of the intermediate is what helps. The `scratchpad` baseline, which writes the square's final grid cell before answering, is implemented to separate the two (see [Baselines](#4-baselines)); it has not been run yet.
 - **Familiar pictures.** No test prompt is trained on, but every test picture (the square's final cell plus the circle's cell) also appears in training under a different prompt. The result shows generalization to new questions, not to unseen scenes.
 - **Greedy vs. sampled.** The intervals for the two imagined rows touch, so the difference between them is not established.
 
@@ -152,15 +152,16 @@ Collapse in performance confirms the answer $y_{answer}$ is downstream of the vi
 
 ### **4. Baselines**
 
-Three models are trained identically (same architecture, hyperparameters, training split and number of steps) and share one vocabulary. Only the sequence format differs:
+Four models are trained identically (same architecture, hyperparameters, training split and number of steps) and share one vocabulary. Only the sequence format differs:
 
 | Format | Sequence | Loss on |
 | --- | --- | --- |
 | `image` | prompt, `<IMG_START>`, 256 image tokens, `<IMG_END>`, answer | image tokens, `<IMG_END>`, answer |
 | `text` | prompt, answer | answer |
 | `filler` | prompt, `<IMG_START>`, 256 × `<THINK>`, `<IMG_END>`, answer | answer |
+| `scratchpad` | prompt, the square's final grid cell as text (e.g. " Square ends at (5, 6)."), answer | scratchpad, answer |
 
-The filler model has the image model's sequence length and compute but no visual content, so it separates the effect of the picture from the effect of extra tokens. All three models are scored on the same test items. The image model with its picture removed (`[prompt][IMG_START][IMG_END]`) is still reported, but that input is out of distribution, so it is not a text-only baseline.
+The filler model has the image model's sequence length and compute but no visual content, so it separates the effect of the picture from the effect of extra tokens. The scratchpad model is supervised on the same key quantity as the image model, where the square ends up, but written as a few words instead of a picture. It separates the effect of the picture from the effect of supervising an intermediate step. Its sequences are built from the preprocessed text format when training starts, so data preprocessed before it existed still works. All four models are scored on the same test items. The image model with its picture removed (`[prompt][IMG_START][IMG_END]`) is still reported, but that input is out of distribution, so it is not a text-only baseline.
 
 ### **5. Dataset Invariants**
 
@@ -229,27 +230,29 @@ python src/preprocess.py --data dataset_imagination_v2 --out processed_v2
 
 ### **3. Training**
 
-Train one model per format (see [Baselines](#4-baselines)) on the train split, with identical settings. Every 1,000 iterations each run logs validation loss over all trained tokens and over the answer token alone. Use the answer loss to compare the text and filler models only. The image model predicts its validation answer with the true picture already in its input (teacher forcing), so its answer loss is near zero whether or not it can imagine the picture. Compare it with the other two through the evaluation's imagined rows.
+Train one model per format (see [Baselines](#4-baselines)) on the train split, with identical settings. Every 1,000 iterations each run logs validation loss over all trained tokens and over the answer token alone. Use the answer loss to compare the text and filler models only. The image and scratchpad models predict their validation answer with the true picture or final cell already in their input (teacher forcing), so their answer loss is near zero whether or not they can produce that intermediate themselves. Compare them with the others through the evaluation's imagined and own-scratchpad rows.
 
 ```bash
-python src/train_imaginer.py --format image  --data processed_v2 --out-dir checkpoints
-python src/train_imaginer.py --format text   --data processed_v2 --out-dir checkpoints
-python src/train_imaginer.py --format filler --data processed_v2 --out-dir checkpoints
+python src/train_imaginer.py --format image      --data processed_v2 --out-dir checkpoints
+python src/train_imaginer.py --format text       --data processed_v2 --out-dir checkpoints
+python src/train_imaginer.py --format filler     --data processed_v2 --out-dir checkpoints
+python src/train_imaginer.py --format scratchpad --data processed_v2 --out-dir checkpoints
 ```
 
 Checkpoints are written as `checkpoints/imaginer_v2_<format>_ckpt_<iter>.pth` and `checkpoints/imaginer_v2_<format>_final.pth`. Each one stores its format and vocabulary alongside the weights. `v2` marks the residual-stream fix: every script refuses checkpoints without the tag, because those were trained with the bug.
 
-Training runs on CUDA, Apple MPS or the CPU. Each batch is padded only to its longest sequence, and attention uses PyTorch's fused `scaled_dot_product_attention`. On NVIDIA GPUs with tensor cores (A100, H100, L4), matrix multiplies run in TF32, which is faster but rounds slightly differently from other devices. Train all three formats on the same type of GPU so the comparison is not affected by hardware.
+Training runs on CUDA, Apple MPS or the CPU. Each batch is padded only to its longest sequence, and attention uses PyTorch's fused `scaled_dot_product_attention`. On NVIDIA GPUs with tensor cores (A100, H100, L4), matrix multiplies run in TF32, which is faster but rounds slightly differently from other devices. Train all formats on the same type of GPU so the comparison is not affected by hardware.
 
 ### **4. Evaluation**
 
-Run the forced-choice evaluation on the held-out test split. It scores `--n` items with distinct configurations (default 1,000; repeated renders of one prompt are not independent) in the test split's class mix, runs every model on the same items, and reports each accuracy with a 95% Wilson confidence interval, plus the majority-class baseline. Any of the three checkpoints can be left out. Each checkpoint records the configurations it trained on, and the evaluation refuses one that trained on any configuration in this test split (for example, a model trained on data generated with a different `--seed`).
+Run the forced-choice evaluation on the held-out test split. It scores `--n` items with distinct configurations (default 1,000; repeated renders of one prompt are not independent) in the test split's class mix, runs every model on the same items, and reports each accuracy with a 95% Wilson confidence interval, plus the majority-class baseline. Any of the checkpoints can be left out. The scratchpad model writes its own final cell before answering; the evaluation also reports its answer when given the true cell (its ceiling) and how often its own scratchpad is exactly right. Each checkpoint records the configurations it trained on, and the evaluation refuses one that trained on any configuration in this test split (for example, a model trained on data generated with a different `--seed`).
 
 ```bash
 python evaluation/evaluate_rigorous.py --data processed_v2 --n 1000 \
     --image-ckpt checkpoints/imaginer_v2_image_final.pth \
     --text-ckpt checkpoints/imaginer_v2_text_final.pth \
-    --filler-ckpt checkpoints/imaginer_v2_filler_final.pth
+    --filler-ckpt checkpoints/imaginer_v2_filler_final.pth \
+    --scratchpad-ckpt checkpoints/imaginer_v2_scratchpad_final.pth
 ```
 
 ### **5. Tests**

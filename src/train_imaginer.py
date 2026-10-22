@@ -16,7 +16,8 @@ LEARNING_RATE = 3e-4 # Learning rate
 MAX_ITERS = 30000 # Training steps per model (about 2.7 epochs of the 90k-sample train split at batch size 8)
 VAL_INTERVAL = 1000 # Validate every 1000 iterations
 SAVE_INTERVAL = 5000 # Save every 5000 iterations
-FORMATS = ("image", "text", "filler") # Built by preprocess.py; identical training for all three
+FORMATS = ("image", "text", "filler", "scratchpad") # Identical training for all; scratchpad is derived from text at load time
+SCRATCHPAD = " Square ends at ({}, {})." # The scratchpad format writes the square's final grid cell before answering
 CKPT_VERSION = "v2" # In checkpoint names and contents. v2 = pre-LN residual fix; untagged checkpoints are invalid
 
 if torch.cuda.is_available(): DEVICE = 'cuda'
@@ -28,14 +29,37 @@ print(f"Using Device: {DEVICE}")
 torch.backends.cuda.matmul.allow_tf32 = True
 
 # --- 1. DATASET WITH METADATA LOADING ---
+def scratchpad_text(config):
+    """The scratchpad format's intermediate: the square's final grid cell, the key quantity the picture shows."""
+    (sx, sy), (dx, dy) = config["square_start"], config["move"]
+    return SCRATCHPAD.format(sx + dx, sy + dy)
+
+def add_scratchpad(samples):
+    """Adds the scratchpad format (prompt, the square's final grid cell as text, answer) to each sample, built
+    from its stored text format and configuration, so data preprocessed before this format existed still works."""
+    from transformers import GPT2TokenizerFast
+    tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+    encoded = {}
+    for s in samples:
+        n_prompt = s["loss_start"]["text"]  # the text format is prompt, answer
+        prompt, answer = s["tokens"]["text"][:n_prompt], s["tokens"]["text"][n_prompt:]
+        text = scratchpad_text(s["config"])
+        if text not in encoded:
+            encoded[text] = torch.tensor(tokenizer.encode(text), dtype=torch.long)
+        s["tokens"]["scratchpad"] = torch.cat([prompt, encoded[text], answer])
+        s["loss_start"]["scratchpad"] = n_prompt  # the scratchpad is generated, so it is trained
+        s["answer_start"]["scratchpad"] = n_prompt + len(encoded[text])
+
 class ImaginationDataset(Dataset):
     def __init__(self, pt_path, fmt):
         data = torch.load(pt_path, weights_only=False)
         self.samples = data['samples']
         self.meta = data['meta'] # Load the Truth
         self.fmt = fmt
-        assert fmt in self.meta['formats'], f"{pt_path} has no '{fmt}' format"
-        
+        assert fmt in self.meta['formats'] or fmt == "scratchpad", f"{pt_path} has no '{fmt}' format"
+        if fmt == "scratchpad":
+            add_scratchpad(self.samples)
+
         self.vocab_size = self.meta['vocab_size_total']
         self.img_start_id = self.meta['img_start_id']
         self.img_end_id = self.meta['img_end_id']
@@ -180,6 +204,12 @@ def check_loss_mask(dataset):
         # The image tokens, <IMG_END>, then the answer
         assert len(targets) == n_img + 1 + len(answer), f"image: {len(targets)} trained targets"
         assert (targets[:n_img] >= dataset.meta['vocab_offset']).all() and targets[n_img] == dataset.img_end_id
+    elif dataset.fmt == "scratchpad":
+        # The written-out final cell, then the answer
+        s = dataset.samples[0]
+        scratchpad = s["tokens"]["scratchpad"][s["loss_start"]["scratchpad"]:s["answer_start"]["scratchpad"]]
+        assert len(scratchpad) >= 1 and torch.equal(targets, torch.cat([scratchpad, answer])), \
+            f"scratchpad: {len(targets)} trained targets, expected the scratchpad and the answer"
     else:
         # text and filler: the answer only (the filler's <THINK> tokens are input, never targets)
         assert torch.equal(targets, answer), f"{dataset.fmt}: {len(targets)} trained targets, expected the answer only"
@@ -204,7 +234,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train the imaginer on the train split.")
     parser.add_argument("--format", required=True, choices=FORMATS,
                         help="image: prompt, image tokens, answer | text: prompt, answer | "
-                             "filler: prompt, 256 <THINK> tokens, answer")
+                             "filler: prompt, 256 <THINK> tokens, answer | "
+                             "scratchpad: prompt, the square's final grid cell as text, answer")
     parser.add_argument("--data", default=DATA_DIR, help="directory with train.pt and val.pt")
     parser.add_argument("--out-dir", default=OUT_DIR, help="where checkpoints are written")
     parser.add_argument("--max-iters", type=int, default=MAX_ITERS)

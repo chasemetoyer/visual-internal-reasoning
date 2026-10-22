@@ -7,7 +7,7 @@ import math
 import argparse
 from collections import Counter, defaultdict
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.train_imaginer import load_checkpoint, config_id
+from src.train_imaginer import load_checkpoint, config_id, scratchpad_text
 import random
 from tqdm import tqdm
 
@@ -75,13 +75,15 @@ def evaluate():
     parser.add_argument("--image-ckpt", help="model trained on prompt, image tokens, answer")
     parser.add_argument("--text-ckpt", help="model trained on prompt, answer")
     parser.add_argument("--filler-ckpt", help="model trained on prompt, 256 <THINK> tokens, answer")
+    parser.add_argument("--scratchpad-ckpt", help="model trained on prompt, the square's final grid cell as text, answer")
     parser.add_argument("--n", type=int, default=NUM_SAMPLES, help="number of distinct test items to score")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    ckpts = {"image": args.image_ckpt, "text": args.text_ckpt, "filler": args.filler_ckpt}
+    ckpts = {"image": args.image_ckpt, "text": args.text_ckpt, "filler": args.filler_ckpt,
+             "scratchpad": args.scratchpad_ckpt}
     ckpts = {fmt: path for fmt, path in ckpts.items() if path}
     if not ckpts:
-        parser.error("pass at least one of --image-ckpt, --text-ckpt, --filler-ckpt")
+        parser.error("pass at least one of --image-ckpt, --text-ckpt, --filler-ckpt, --scratchpad-ckpt")
 
     # Reproducibility
     random.seed(args.seed)
@@ -118,6 +120,7 @@ def evaluate():
         "teacher": 0, "blindfold": 0, "picture_removed": 0, 
         "imagined_greedy": 0, "imagined_sampled": 0,
         "text_model": 0, "filler_model": 0,
+        "scratchpad_teacher": 0, "scratchpad_own": 0, "scratchpad_correct": 0,
         "total_valid": 0, "gt_yes_count": 0
     }
     
@@ -140,6 +143,27 @@ def evaluate():
                 baseline_input = s['tokens'][fmt][:s['loss_start'][fmt]].to(DEVICE).unsqueeze(0)
                 if get_answer_probs_stable(models[fmt], baseline_input, yes_id, no_id) == true_token:
                     results[key] += 1
+
+        # --- SCRATCHPAD: writes the square's final grid cell as text, then answers ---
+        # Greedy, so it uses no randomness and leaves the image model's noise and sampling below unchanged
+        if "scratchpad" in models:
+            scratch_model = models["scratchpad"]
+            prompt_ids = s['tokens']['text'][:s['loss_start']['text']].to(DEVICE).unsqueeze(0)
+            true_pad = torch.tensor(tokenizer.encode(scratchpad_text(s['config'])), device=DEVICE).unsqueeze(0)
+            # Ceiling: the true final cell is given (teacher forced)
+            if get_answer_probs_stable(scratch_model, torch.cat((prompt_ids, true_pad), dim=1), yes_id, no_id) == true_token:
+                results["scratchpad_teacher"] += 1
+            # Own scratchpad: the model writes as many text tokens as the true scratchpad has, then answers
+            written = prompt_ids
+            with torch.no_grad():
+                for _ in range(true_pad.size(1)):
+                    logits, _ = scratch_model(written)
+                    logits = logits[:, -1, :].clone()
+                    logits[:, meta['img_start_id']:] = -1e10  # special and image tokens: text only
+                    written = torch.cat((written, torch.argmax(logits, dim=-1, keepdim=True)), dim=1)
+            results["scratchpad_correct"] += int(torch.equal(written[:, prompt_ids.size(1):], true_pad))
+            if get_answer_probs_stable(scratch_model, written, yes_id, no_id) == true_token:
+                results["scratchpad_own"] += 1
 
         if "image" not in models: continue
         model = models["image"]
@@ -238,6 +262,11 @@ def evaluate():
         report("Text model (prompt, answer):", "text_model")
     if "filler" in models:
         report("Filler model (prompt, 256 <THINK> tokens, answer):", "filler_model")
+    if "scratchpad" in models:
+        print("-" * 86)
+        report("Scratchpad model, true final cell given (ceiling):", "scratchpad_teacher")
+        report("Scratchpad model, own scratchpad (greedy):", "scratchpad_own")
+        report("  ...scratchpad written exactly right:", "scratchpad_correct")
     print("="*86)
     if "image" not in models: return
     
