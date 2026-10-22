@@ -13,7 +13,7 @@ OUT_DIR = "checkpoints" # Default --out-dir
 BATCH_SIZE = 8 # Keep this low for Mac/MPS stability
 BLOCK_SIZE = 512 # Context window size
 LEARNING_RATE = 3e-4 # Learning rate
-MAX_ITERS = 30000 # SCALED UP: 2.5k -> 30k (This is roughly 2.5 epochs)
+MAX_ITERS = 30000 # Training steps per model (about 2.7 epochs of the 90k-sample train split at batch size 8)
 VAL_INTERVAL = 1000 # Validate every 1000 iterations
 SAVE_INTERVAL = 5000 # Save every 5000 iterations
 FORMATS = ("image", "text", "filler") # Built by preprocess.py; identical training for all three
@@ -74,8 +74,7 @@ def pad_batch(batch):
 
 # --- 2. MODEL (Standard) ---
 class GPT(nn.Module):
-    # ... (Same GPT class as before, just pasting the essentials to save space) ...
-    # ... Assume standard nanoGPT implementation here ...
+    # nanoGPT-style decoder: token + learned position embeddings, n_layer pre-LN Blocks, final LayerNorm, LM head
     def __init__(self, config):
         super().__init__()
         self.token_embedding_table = nn.Embedding(config.vocab_size, config.n_embd)

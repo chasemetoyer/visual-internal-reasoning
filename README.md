@@ -106,6 +106,7 @@ This research investigates three core claims regarding multimodal reasoning in t
 ├── tests/
 │   └── test_block.py             # Residual-stream regression test for the transformer block
 │
+├── colab_pipeline.ipynb          # Runs the whole pipeline step by step on Colab (or locally)
 └── requirements.txt              # Project dependencies
 ```
 
@@ -276,10 +277,10 @@ python visualization/visualize.py --ckpt checkpoints/imaginer_v2_image_final.pth
 If you use this code or methodology, please cite:
 
 ```bibtex
-@misc{metoyer2024visualreasoning,
+@misc{metoyer2026visualreasoning,
   title={Visual Internal Reasoning: Causal Dependency on Latent Image Tokens},
   author={Metoyer, Chase},
-  year={2024},
+  year={2026},
   publisher={GitHub},
   journal={GitHub repository},
   howpublished={\url{https://github.com/chasemetoyer/visual-internal-reasoning}}

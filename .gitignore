@@ -4,7 +4,7 @@ __pycache__/
 .DS_Store
 dataset_imagination_*/
 *.ckpt
-*.yaml
+vqgan_imagenet_f16_16384.yaml
 *.pth
 *.pt
 downloader.py
