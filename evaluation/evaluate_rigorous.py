@@ -51,7 +51,8 @@ def config_key(sample):
     return (tuple(c['square_start']), tuple(c['circle']), tuple(c['move']))
 
 def stratum(sample):
-    return sample['label']
+    # Yes / near-miss No / far No, so the scored items keep the split's mix of hard negatives
+    return (sample['label'], sample['near_miss'])
 
 def select_items(samples, n, seed):
     """Picks up to n items with distinct configurations, in the test split's own class mix.
@@ -219,6 +220,9 @@ def evaluate():
     print(f"Scored Items Balance (Yes %): {yes_rate:.1f}%  -> Majority Baseline {majority_baseline:.1f}% (Beat this to be useful)")
     print(f"Full Test Split (Yes %):      {split_yes_rate:.1f}%  -> Majority Baseline "
           f"{max(split_yes_rate, 100 - split_yes_rate):.1f}% ({len(samples)} samples)")
+    n_near = sum(samples[i]['near_miss'] for i in indices)
+    print(f"Scored Items: {results['gt_yes_count']} Yes, {n_near} No near misses, "
+          f"{total - results['gt_yes_count'] - n_near} No far apart")
     if "image" in models:
         print("-" * 86)
         acc_teach = report("Image model, teacher forced (ceiling):", "teacher")

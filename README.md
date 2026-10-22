@@ -17,6 +17,12 @@ Our results demonstrate that models trained with forced internal visual intermed
 > **Superseded — do not cite.** This table is kept for the record only. It is not valid because:
 > - It was measured on training questions: the evaluation sampled its items from `train_data_final.pt`, the same file the model was trained on.
 > - The "Text-Only" row was not a text-only baseline: it fed the image model `[prompt][IMG_START][IMG_END]`, an input it never saw in training.
+> - The old generator's labels and pictures disagreed. `src/audit_datafactory.py` over all 100k old samples found that:
+>   - 2.9% of labels contradict the shapes as drawn, mostly "No" pairs drawn overlapping.
+>   - 20.4% of images have a shape partly or wholly outside the frame.
+>   - 7.4% of samples share their exact prompt with a sample of the opposite label.
+>   - In 56% of images the square hides part of the circle.
+>   - The drawn square never sits where its prompt puts it (within 1 px).
 >
 > Re-run the pipeline in [Getting Started](#getting-started) for valid numbers.
 
@@ -57,7 +63,8 @@ This research investigates three core claims regarding multimodal reasoning in t
 ├── src/
 │   ├── train_imaginer.py         # Main autoregressive training loop
 │   ├── preprocess.py             # Data pipeline: Images -> VQ Indices -> .pt
-│   └── datafactory.py            # Synthetic dataset generation engine
+│   ├── datafactory.py            # Synthetic dataset generation engine
+│   └── audit_datafactory.py      # Re-checks the dataset invariants from the written files
 │
 ├── evaluation/
 │   ├── evaluate_rigorous.py      # Statistical evaluation (Teacher vs Blindfold vs Imagined)
@@ -115,6 +122,24 @@ Three models are trained identically (same architecture, hyperparameters, traini
 
 The filler model has the image model's sequence length and compute but no visual content, so it separates the effect of the picture from the effect of extra tokens. All three models are scored on the same test items. The image model with its picture removed (`[prompt][IMG_START][IMG_END]`) is still reported, but that input is out of distribution, so it is not a text-only baseline.
 
+### **5. Dataset Invariants**
+
+`src/datafactory.py` draws each shape exactly at a grid-cell centre: cell *g* sits at 15 + 25*g* px, for cells 1–8. The prompt therefore fully determines the picture and the answer; the only randomness is the faint background lines. Every sample is asserted to satisfy:
+
+| Invariant | Rule |
+| --- | --- |
+| Prompt determines the answer | No position jitter: the cells in the prompt are the cells drawn. |
+| Label comes from the drawing | `Yes` exactly when the rendered square and circle share a pixel, cross-checked against the exact square–circle distance. |
+| Both shapes inside the frame | Both 41 px shapes stay at least 20 px from every edge. |
+| Both shapes visible | The shared region is drawn purple (a red/blue mix), and both outlines are drawn last. |
+| Clear overlap | Every `Yes` reaches at least 8 px into the circle and shares at least 100 pixels. The closest `Yes` on the grid is 12.9 px deep and shares 164 pixels. |
+| Clear gap | Every `No` leaves at least 8 px of background between the shapes. The closest `No` on the grid is 10 px apart. |
+| Balance | 50% `Yes`. Half of the `No` samples are near misses, with a gap under one grid unit (25 px). |
+
+`src/audit_datafactory.py` re-checks these invariants from the files alone. It parses each prompt and locates both shapes from pixel colours, without calling the generator.
+
+The split is over configurations (square start, circle position, move), so no test prompt is ever trained on. The picture, however, depends only on the square's final cell and the circle's cell. There are 4,096 such scenes, each reachable by about 20 start/move combinations. With `--size 100000`, every test scene also appears in training under a different prompt (`datafactory.py` prints the count). The test therefore measures new questions about familiar pictures, not unseen pictures.
+
 ---
 
 ## **Getting Started**
@@ -145,6 +170,12 @@ Generate the synthetic spatial reasoning dataset (100k samples). Each unique con
 
 ```bash
 python src/datafactory.py --size 100000 --seed 0 --out dataset_imagination_v2
+```
+
+Audit the written files against the [dataset invariants](#5-dataset-invariants). Pass several directories to compare them side by side, including the old generator's `dataset_imagination_balanced/` if you still have it. Use `--limit N` to check a random sample of images instead of all of them.
+
+```bash
+python src/audit_datafactory.py dataset_imagination_v2
 ```
 
 ### **2. Preprocessing**

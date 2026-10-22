@@ -135,6 +135,7 @@ def main():
                 "answer_start": {fmt: len(seq) - len(answer_ids) for fmt, seq in sequences.items()},
                 "config": entry['config'],
                 "label": entry['answer'],
+                "near_miss": entry['near_miss'],
             })
 
             # --- SANITY CHECKS (First Sample Only) ---
