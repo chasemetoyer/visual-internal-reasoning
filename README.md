@@ -6,7 +6,7 @@ Large language models (LLMs) exhibit strong performance on linguistic reasoning 
 
 We propose a unified decoder-only architecture in which discrete image tokens, obtained from a pretrained vector-quantized autoencoder (VQGAN), are incorporated directly into the model’s vocabulary alongside standard text tokens. The model is trained autoregressively to generate an intermediate sequence of image tokens—interpreted as an internal “imagined” visual state—prior to producing a textual answer.
 
-In a first run on 1,000 held-out test questions (data seed 0, training seed 0), the model that imagines the picture before answering is correct 96.5% of the time with greedy decoding, and 98.5% when it samples the picture. An identically trained text-only model gets 61.3%, and a model given 256 filler tokens in place of the picture gets 53.6%. Replacing or removing the imagined picture drops the image model to chance (50.0% and 48.3%), so its answers depend on the visual representation.
+In a first run on 1,000 held-out test questions (data seed 0, training seed 0), the model that imagines the picture before answering is correct 96.5% of the time with greedy decoding, and 98.5% when it samples the picture. An identically trained text-only model gets 61.3%, and a model given 256 filler tokens in place of the picture gets 53.6%. Replacing or removing the imagined picture drops the image model to chance (50.0% and 48.3%), so its answers depend on the visual representation. A model trained to write where the square ends up as text instead (its final grid cell, in 8 tokens) gets 99.9%, matching or beating the imagined picture. On this task the gain comes from producing an intermediate step, not from that step being visual.
 
 > These are single-run results with open caveats; see [Results](#results-single-run). The original prototype's numbers (90.5% imagined vs. 57.0% blindfold) were not valid and are kept, marked superseded, under [Superseded: Original Prototype Results](#superseded-original-prototype-results-n200).
 
@@ -25,20 +25,26 @@ Forced-choice evaluation on 1,000 held-out test items with distinct configuratio
 | Image | Picture removed (out of distribution) | 48.3% | [45.2, 51.4] |
 | Text | Prompt, then answer | 61.3% | [58.2, 64.3] |
 | Filler | Prompt, 256 `<THINK>` tokens, then answer | 53.6% | [50.5, 56.7] |
+| Scratchpad | Teacher forced: true final cell given (ceiling) | 99.9% | [99.4, 100.0] |
+| Scratchpad | Own scratchpad, greedy: the model writes the final cell, then answers | **99.9%** | [99.4, 100.0] |
+| Scratchpad | Own scratchpad matches the true final cell exactly | 100.0% | [99.6, 100.0] |
 
 **What this shows.** On questions it never trained on, the model that imagines the picture before answering is far more accurate than identically trained models that answer directly or after 256 filler tokens. The gaps are far wider than the confidence intervals. With its picture replaced or removed, the image model falls to chance, so its answers depend on the picture rather than on a shortcut through the prompt text. The filler model shows that extra sequence length and compute alone barely help.
+
+**What helps is the intermediate step, not the picture.** The scratchpad model, trained to write the square's final grid cell as text before answering, matches or beats the imagined picture: 99.9%, with an interval that overlaps neither imagined row. Both ceilings are near 100%, so neither model has trouble answering once it has the right intermediate; the difference is in producing it. The scratchpad model wrote the final cell exactly right on all 1,000 items, in 8 tokens, while the image model's errors come from its imagined 256-token pictures. So on this task the gain comes from training the model to work out where the square ends up before answering, not from that step being visual. Imagining the picture is one way to do it, and in this run a costlier and slightly less accurate one than writing the cell down.
 
 **Data and training.**
 - **Dataset:** generated with `--seed 0`. It has 90,000 training, 5,000 validation and 5,000 test samples, drawn from 45,540, 2,530 and 2,530 distinct configurations.
 - **Audit:** running `src/audit_datafactory.py` on that exact dataset found no failures on any invariant across all 100,000 images. The dataset is exactly 50.0% Yes, near misses make up 50.0% of the No samples, and no test prompt appears in train or val.
-- **Training settings:** the same for all three models: batch size 8, learning rate 3e-4, training seed 0, 30,000 steps.
-- **Image model:** its 30,000 steps took 736 s on a Colab GPU, and its validation loss fell from 3.45 at step 1,000 to 1.94 at the end. Its validation answer loss reached 0.0007, but that number is teacher-forced (the true picture is in the input), so it is not comparable with the other two models.
+- **Training settings:** the same for all four models: batch size 8, a constant learning rate of 3e-4 (no decay), training seed 0, 30,000 steps.
+- **Image model:** its 30,000 steps took 736 s on a Colab GPU, and its validation loss fell from 3.45 at step 1,000 to 1.94 at the end. Its validation answer loss reached 0.0007, but that number is teacher-forced (the true picture is in the input), so it is not comparable with the text and filler models.
 - **Text model:** its 30,000 steps took 468 s. Its validation answer loss stayed between 0.678 and 0.720, around ln 2 ≈ 0.693 (the loss of a 50/50 guess), until step 21,000. It then started to fall and reached 0.637 at the end, so the model was still learning when training stopped.
 - **Filler model:** its 30,000 steps took 721 s. Its validation answer loss stayed between 0.679 and 0.710 for the whole run and ended at 0.686, so it never moved off chance.
+- **Scratchpad model:** it is trained on 9 tokens per example, the 8 scratchpad tokens and the answer. It learned to write the final cell almost at once: by step 1,000 the answer token made up over 99% of its validation loss, so the scratchpad tokens were already nearly free. Its validation answer loss is teacher-forced like the image model's (the true cell is in the input). It was at chance at step 1,000 (0.687), fell to 0.0024 by step 9,000, and then moved between about 0.01 and 0.22 through step 14,000, the last step these figures cover.
 
 **Caveats.**
-- **One run.** The intervals cover which test items were drawn, not training randomness. The text model was still escaping a plateau: its validation answer loss sat at chance until step 21,000 and was still falling when training stopped at step 30,000. Its score is therefore sensitive to the training seed and step budget, and the comparison holds at a fixed budget of 30,000 steps. Replicate with other training and data seeds before citing.
-- **Picture or supervision?** The image model is trained on 256 picture tokens per example, while the text and filler models are trained on the answer token alone. The filler model controls for compute but not for that extra supervision, so these results do not yet show that the *visual* form of the intermediate is what helps. The `scratchpad` baseline, which writes the square's final grid cell before answering, is implemented to separate the two (see [Baselines](#4-baselines)); it has not been run yet.
+- **One run.** The intervals cover which test items were drawn, not training randomness. The text model was still escaping a plateau: its validation answer loss sat at chance until step 21,000 and was still falling when training stopped at step 30,000. Its score is therefore sensitive to the training seed and step budget, and the comparison holds at a fixed budget of 30,000 steps. Replicate with other training and data seeds before citing. The scratchpad's lead over the imagined picture is small (99.9% against 98.5% sampled), so read it as matching or beating the picture, not as a settled ranking.
+- **An easy intermediate.** The scratchpad is supervised on exactly the quantity the answer needs, the square's final cell, and here that is two small numbers that are easy to write. The picture is a generic intermediate that would serve any question about the scene. These results do not rule out a picture helping where the intermediate state is hard to put into words, for example with many objects or continuous positions.
 - **Familiar pictures.** No test prompt is trained on, but every test picture (the square's final cell plus the circle's cell) also appears in training under a different prompt. The result shows generalization to new questions, not to unseen scenes.
 - **Greedy vs. sampled.** The intervals for the two imagined rows touch, so the difference between them is not established.
 
@@ -83,6 +89,11 @@ This research investigates three core claims regarding multimodal reasoning in t
 1. **H1 (Inductive Bias):** Explicit internal visual representations provide a beneficial inductive bias for reasoning over spatial relations and object interactions.
 2. **H2 (Necessity):** The generated visual tokens are necessary intermediates for correct reasoning, not merely auxiliary outputs.
 3. **H3 (Generalization):** Models with internal visual intermediates exhibit improved robustness to linguistic paraphrasing and prompt perturbations compared to text-only models.
+
+**Status after the first run** (see [Results](#results-single-run)):
+- **H1** holds only against models without an intermediate step. Imagining beats answering directly (96.5–98.5% vs. 61.3%), but a text scratchpad with the square's final cell does as well or better (99.9%), so on this task the benefit is not specific to the visual form.
+- **H2** holds for the image model: replacing or removing its picture drops it to chance (50.0% and 48.3%).
+- **H3** has not been tested.
 
 ---
 
@@ -245,7 +256,7 @@ Training runs on CUDA, Apple MPS or the CPU. Each batch is padded only to its lo
 
 ### **4. Evaluation**
 
-Run the forced-choice evaluation on the held-out test split. It scores `--n` items with distinct configurations (default 1,000; repeated renders of one prompt are not independent) in the test split's class mix, runs every model on the same items, and reports each accuracy with a 95% Wilson confidence interval, plus the majority-class baseline. Any of the checkpoints can be left out. The scratchpad model writes its own final cell before answering; the evaluation also reports its answer when given the true cell (its ceiling) and how often its own scratchpad is exactly right. Each checkpoint records the configurations it trained on, and the evaluation refuses one that trained on any configuration in this test split (for example, a model trained on data generated with a different `--seed`).
+Run the forced-choice evaluation on the held-out test split. It scores `--n` items with distinct configurations (default 1,000; repeated renders of one prompt are not independent) in the test split's class mix, runs every model on the same items, and reports each accuracy with a 95% Wilson confidence interval, plus the majority-class baseline. Any of the checkpoints can be left out. The scratchpad model writes its own final cell before answering; the evaluation also reports its answer when given the true cell (its ceiling) and how often its own scratchpad is exactly right. Each checkpoint records the configurations it trained on, and the evaluation refuses one that trained on any configuration in this test split (for example, a model trained on data generated with a different `--seed`). The `VERDICT` lines at the end check only the image model, comparing its teacher-forced and imagined accuracy against the blindfold with fixed margins; they do not compare it with the other models.
 
 ```bash
 python evaluation/evaluate_rigorous.py --data processed_v2 --n 1000 \
